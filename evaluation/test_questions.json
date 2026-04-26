@@ -1,0 +1,102 @@
+[
+  {
+    "question": "What are the KYC requirements for opening a bank account in India?",
+    "category": "RBI",
+    "expected_topics": ["PAN", "Aadhaar", "Officially Valid Documents", "OVD"]
+  },
+  {
+    "question": "What are the periodic KYC update timelines for different risk categories?",
+    "category": "RBI",
+    "expected_topics": ["high risk", "medium risk", "low risk", "years"]
+  },
+  {
+    "question": "What are the key restrictions on digital lending apps?",
+    "category": "RBI",
+    "expected_topics": ["LSP", "disbursal", "borrower", "bank account"]
+  },
+  {
+    "question": "How must fees and charges be disclosed in digital lending?",
+    "category": "RBI",
+    "expected_topics": ["APR", "Key Fact Statement", "transparency"]
+  },
+  {
+    "question": "What is the purpose of an Account Aggregator?",
+    "category": "AA",
+    "expected_topics": ["consent", "financial information", "FIP", "FIU"]
+  },
+  {
+    "question": "What are the consent requirements under the AA Framework?",
+    "category": "AA",
+    "expected_topics": ["explicit consent", "revocation", "purpose", "duration"]
+  },
+  {
+    "question": "What is the minimum net owned fund requirement for an NBFC-AA?",
+    "category": "AA",
+    "expected_topics": ["NOF", "crore", "capital"]
+  },
+  {
+    "question": "What are the compliance obligations for stock brokers regarding client funds?",
+    "category": "SEBI",
+    "expected_topics": ["segregation", "client money", "bank account"]
+  },
+  {
+    "question": "What are the reporting requirements for stock brokers to SEBI?",
+    "category": "SEBI",
+    "expected_topics": ["reporting", "compliance", "periodic"]
+  },
+  {
+    "question": "What are the risk management norms for mutual funds?",
+    "category": "SEBI",
+    "expected_topics": ["risk", "portfolio", "disclosure"]
+  },
+  {
+    "question": "What are the penalties for non-compliance with KYC norms?",
+    "category": "RBI",
+    "expected_topics": ["penalty", "fine", "action"]
+  },
+  {
+    "question": "Can a digital lending app retain biometric data of borrowers?",
+    "category": "RBI",
+    "expected_topics": ["biometric", "data", "prohibited"]
+  },
+  {
+    "question": "What is the role of a Financial Information Provider (FIP) in the AA framework?",
+    "category": "AA",
+    "expected_topics": ["FIP", "data sharing", "consent artifact"]
+  },
+  {
+    "question": "What is the role of a Financial Information User (FIU)?",
+    "category": "AA",
+    "expected_topics": ["FIU", "data consumer", "purpose"]
+  },
+  {
+    "question": "What are the norms for margin trading for stock brokers?",
+    "category": "SEBI",
+    "expected_topics": ["margin", "exposure", "limits"]
+  },
+  {
+    "question": "What records must be maintained under PMLA by financial institutions?",
+    "category": "RBI",
+    "expected_topics": ["PMLA", "records", "transactions", "years"]
+  },
+  {
+    "question": "What is Video-based Customer Identification Process (V-CIP)?",
+    "category": "RBI",
+    "expected_topics": ["V-CIP", "video", "KYC", "identification"]
+  },
+  {
+    "question": "What is the consent artifact in the AA framework?",
+    "category": "AA",
+    "expected_topics": ["consent artifact", "standardized", "FI types"]
+  },
+  {
+    "question": "What disclosure requirements apply to mutual fund schemes?",
+    "category": "SEBI",
+    "expected_topics": ["SID", "KIM", "disclosure"]
+  },
+  {
+    "question": "What are cooling-off period requirements in digital lending?",
+    "category": "RBI",
+    "expected_topics": ["cooling-off", "look-up period", "cancel"]
+  }
+]

@@ -1,0 +1,62 @@
+[
+  {
+    "filename": "RBI_KYC_Master_Direction_2016.pdf",
+    "name": "RBI Master Direction on KYC 2016",
+    "circular_id": "RBI/DBR.AML.BC.No.81/14.01.001/2015-16",
+    "category": "RBI",
+    "subcategory": "KYC",
+    "date": "2016-02-25",
+    "issuer": "Reserve Bank of India",
+    "url": "https://www.rbi.org.in/Scripts/BS_ViewMasDirections.aspx?id=11566"
+  },
+  {
+    "filename": "RBI_Digital_Lending_Guidelines_2022.pdf",
+    "name": "RBI Guidelines on Digital Lending 2022",
+    "circular_id": "RBI/2022-23/111",
+    "category": "RBI",
+    "subcategory": "Digital Lending",
+    "date": "2022-09-02",
+    "issuer": "Reserve Bank of India",
+    "url": "https://www.rbi.org.in/Scripts/NotificationUser.aspx?Id=12382"
+  },
+  {
+    "filename": "RBI_Account_Aggregator_Master_Direction.pdf",
+    "name": "RBI Master Direction on Account Aggregator Framework",
+    "circular_id": "RBI/DNBR/2016-17/46",
+    "category": "AA",
+    "subcategory": "Account Aggregator",
+    "date": "2016-09-02",
+    "issuer": "Reserve Bank of India",
+    "url": "https://www.rbi.org.in/Scripts/BS_ViewMasDirections.aspx?id=10598"
+  },
+  {
+    "filename": "SEBI_Stock_Broker_Master_Circular_2023.pdf",
+    "name": "SEBI Master Circular for Stock Brokers 2023",
+    "circular_id": "SEBI/HO/MIRSD/MIRSD-PoD-1/P/CIR/2023/67",
+    "category": "SEBI",
+    "subcategory": "Stock Brokers",
+    "date": "2023-05-17",
+    "issuer": "Securities and Exchange Board of India",
+    "url": "https://www.sebi.gov.in/legal/circulars/may-2023/master-circular-for-stock-brokers_71868.html"
+  },
+  {
+    "filename": "SEBI_Mutual_Funds_Master_Circular_2024.pdf",
+    "name": "SEBI Master Circular for Mutual Funds 2024",
+    "circular_id": "SEBI/HO/IMD/IMD-PoD-1/P/CIR/2024/14",
+    "category": "SEBI",
+    "subcategory": "Mutual Funds",
+    "date": "2024-02-15",
+    "issuer": "Securities and Exchange Board of India",
+    "url": "https://www.sebi.gov.in"
+  },
+  {
+    "filename": "ReBIT_AA_Technical_Specifications.pdf",
+    "name": "ReBIT Account Aggregator Technical Specifications v2.0",
+    "circular_id": "ReBIT/AA/TECH/2023",
+    "category": "AA",
+    "subcategory": "Technical",
+    "date": "2023-01-01",
+    "issuer": "ReBIT",
+    "url": "https://rebit.org.in"
+  }
+]
