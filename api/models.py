@@ -9,8 +9,16 @@ class QueryRequest(BaseModel):
     category: Optional[Literal["ALL", "RBI", "SEBI", "AA"]] = Field(
         default="ALL", description="Filter by document category"
     )
-    top_k: Optional[int] = Field(default=5, ge=1, le=10, description="Number of chunks to retrieve")
+    top_k: Optional[int] = Field(default=6, ge=1, le=10, description="Number of chunks to retrieve")
     history: Optional[list[dict]] = Field(default=None, description="Previous conversation turns")
+    answer_mode: Optional[Literal["auto", "regulatory", "general"]] = Field(
+        default="auto",
+        description=(
+            "auto: grounded when confident else general; "
+            "regulatory: citations only / not-found; "
+            "general: finance knowledge without retrieval citations"
+        ),
+    )
 
 
 class SourceDocument(BaseModel):
@@ -30,6 +38,8 @@ class QueryResponse(BaseModel):
     sources: list[SourceDocument]
     chunks_used: int
     usage: dict
+    mode: str = "regulatory"
+    latency_ms: int = 0
 
 
 class IngestRequest(BaseModel):
@@ -59,3 +69,4 @@ class HealthResponse(BaseModel):
     collection_name: str
     total_vectors: int
     model: str
+    rerank_enabled: bool = False

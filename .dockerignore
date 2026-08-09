@@ -1,0 +1,14 @@
+.git
+.venv
+.venv-broken-py314
+venv
+__pycache__
+*.pyc
+.env
+data/documents
+*.pdf
+.pytest_cache
+.mypy_cache
+*.log
+.DS_Store
+agent-transcripts

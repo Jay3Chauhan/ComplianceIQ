@@ -1,6 +1,6 @@
 """
 Text chunking with metadata preservation.
-Splits pages into overlapping chunks for optimal RAG retrieval.
+Larger section-friendly chunks improve citation accuracy for regulatory PDFs.
 """
 
 import uuid
@@ -11,15 +11,24 @@ from config import settings
 
 def create_chunks(pages: list[dict]) -> list[dict]:
     """
-    Splits page-level text into smaller chunks for embedding.
+    Splits page-level text into overlapping chunks for embedding.
     Each chunk inherits full metadata from its parent page.
-
-    Returns list of chunk dicts ready for embedding.
     """
     splitter = RecursiveCharacterTextSplitter(
         chunk_size=settings.chunk_size,
         chunk_overlap=settings.chunk_overlap,
-        separators=["\n\n", "\n", "। ", ". ", " ", ""],
+        separators=[
+            "\n\n\n",
+            "\n\n",
+            "\nChapter ",
+            "\nSection ",
+            "\nClause ",
+            "\n",
+            "। ",
+            ". ",
+            " ",
+            "",
+        ],
         length_function=len,
     )
 
@@ -49,7 +58,10 @@ def create_chunks(pages: list[dict]) -> list[dict]:
                 "issuer": page["issuer"],
                 "filename": page["filename"],
                 "source_url": page["source_url"],
-                "citation": f"{page['doc_name']} | {page['circular_id']} | Page {page['page_number']}",
+                "citation": (
+                    f"{page['doc_name']} | {page['circular_id']} | "
+                    f"Page {page['page_number']}"
+                ),
             }
             chunks.append(chunk)
 

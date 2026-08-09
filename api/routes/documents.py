@@ -48,6 +48,7 @@ async def health_check() -> HealthResponse:
             collection_name=settings.qdrant_collection,
             total_vectors=collection_info.points_count or 0,
             model=settings.groq_model,
+            rerank_enabled=settings.enable_rerank,
         )
     except Exception as e:
         logger.warning(f"Health check degraded: {e}")
@@ -57,4 +58,5 @@ async def health_check() -> HealthResponse:
             collection_name=settings.qdrant_collection,
             total_vectors=0,
             model=settings.groq_model,
+            rerank_enabled=settings.enable_rerank,
         )

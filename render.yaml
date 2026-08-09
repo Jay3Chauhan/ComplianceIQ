@@ -1,0 +1,31 @@
+services:
+  - type: web
+    name: complianceiq-api
+    runtime: docker
+    plan: standard
+    healthCheckPath: /api/health
+    envVars:
+      - key: GROQ_API_KEY
+        sync: false
+      - key: QDRANT_URL
+        sync: false
+      - key: QDRANT_API_KEY
+        sync: false
+      - key: QDRANT_COLLECTION
+        value: regulations
+      - key: ADMIN_API_KEY
+        sync: false
+      - key: APP_ENV
+        value: production
+      - key: ENABLE_RERANK
+        value: "true"
+      - key: CORS_ORIGINS
+        sync: false
+      - key: CHUNK_SIZE
+        value: "900"
+      - key: CHUNK_OVERLAP
+        value: "120"
+      - key: MAX_RETRIEVAL_CHUNKS
+        value: "6"
+      - key: GROUNDED_MIN_SCORE
+        value: "0.45"

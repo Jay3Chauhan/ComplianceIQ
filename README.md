@@ -81,9 +81,12 @@ ComplianceIQ/
 
 ### 1) Create venv + install
 
+Use **Python 3.11–3.13** (3.13 recommended on Windows). Python 3.14 can break native wheels (`cffi`, `numpy`, `pandas`).
+
 ```powershell
-python -m venv .venv
-.venv\Scripts\Activate.ps1
+py -3.13 -m venv venv
+.\venv\Scripts\Activate.ps1
+python -m pip install --upgrade pip
 pip install -r requirements.txt
 ```
 
@@ -91,6 +94,7 @@ pip install -r requirements.txt
 
 - Copy `.env.example` → `.env`
 - Fill in your keys (Groq + Qdrant Cloud)
+- Optional for production: `ADMIN_API_KEY`, `CORS_ORIGINS`, `ENABLE_RERANK`
 
 Important:
 - `.env` is **gitignored** by default.
@@ -118,6 +122,8 @@ In a second terminal:
 ```powershell
 streamlit run frontend/app.py
 ```
+
+For deploy, security, RAG tuning, and ops details see **[PRODUCTION.md](PRODUCTION.md)**.
 
 ## API usage
 
@@ -149,6 +155,7 @@ curl -X POST http://localhost:8000/api/ingest \
 
 ## Troubleshooting
 
+- **`ModuleNotFoundError: No module named '_cffi_backend'`**: your venv was built on an unsupported/mismatched Python (often 3.14). Recreate with `py -3.13 -m venv venv` and reinstall requirements.
 - **Qdrant auth/URL issues**: confirm `QDRANT_URL` and `QDRANT_API_KEY` in `.env`
 - **No results**: confirm you ingested documents and the `QDRANT_COLLECTION` name matches
 - **PDF not ingested**: ensure `data/document_registry.json` includes the PDF filename exactly

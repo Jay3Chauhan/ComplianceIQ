@@ -8,13 +8,15 @@ groq>=0.11.0
 # Vector DB
 qdrant-client>=1.12.0
 
-# Embeddings (Python 3.13 needs torch >= 2.6)
+# Embeddings / rerank (Python 3.13 needs torch >= 2.6)
 sentence-transformers>=3.3.1
 torch>=2.6.0
+langchain-text-splitters>=0.3.0
 
 # PDF Parsing
 PyMuPDF>=1.24.13
 pdfplumber>=0.11.4
+cffi>=1.17.0
 
 # API
 fastapi>=0.115.4

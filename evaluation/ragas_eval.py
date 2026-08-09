@@ -25,12 +25,12 @@ def run_pipeline() -> list[dict]:
     for i, q in enumerate(questions, 1):
         logger.info(f"[{i}/{len(questions)}] {q['question']}")
         try:
-            chunks = retrieve_chunks(
+            chunks, is_grounded = retrieve_chunks(
                 query=q["question"],
                 top_k=5,
                 category_filter=q.get("category"),
             )
-            if not chunks:
+            if not chunks or not is_grounded:
                 records.append({
                     "question": q["question"],
                     "answer": "",
@@ -39,7 +39,11 @@ def run_pipeline() -> list[dict]:
                 })
                 continue
 
-            result = generate_answer(question=q["question"], chunks=chunks)
+            result = generate_answer(
+                question=q["question"],
+                chunks=chunks,
+                is_grounded=True,
+            )
             records.append({
                 "question": q["question"],
                 "answer": result["answer"],

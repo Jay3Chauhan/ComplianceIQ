@@ -1,6 +1,6 @@
 """
-Generates embeddings using BGE-small model and upserts to Qdrant.
-BGE-small runs locally — no API costs, no rate limits.
+Generates embeddings using BGE-small and upserts to Qdrant.
+Supports idempotent re-ingest (delete by filename before upsert).
 """
 
 import time
@@ -12,6 +12,9 @@ from qdrant_client.models import (
     VectorParams,
     Distance,
     PayloadSchemaType,
+    Filter,
+    FieldCondition,
+    MatchValue,
 )
 from tqdm import tqdm
 from loguru import logger
@@ -36,13 +39,13 @@ def get_qdrant_client() -> QdrantClient:
         _qdrant = QdrantClient(
             url=settings.qdrant_url,
             api_key=settings.qdrant_api_key,
-            timeout=120,  # generous timeout for large batch upserts
+            timeout=120,
         )
     return _qdrant
 
 
 def ensure_collection_exists() -> None:
-    """Creates the Qdrant collection if it doesn't exist yet."""
+    """Creates the Qdrant collection and payload indexes if needed."""
     client = get_qdrant_client()
     existing = [c.name for c in client.get_collections().collections]
 
@@ -54,37 +57,66 @@ def ensure_collection_exists() -> None:
                 distance=Distance.COSINE,
             ),
         )
-        client.create_payload_index(
-            settings.qdrant_collection, "category", PayloadSchemaType.KEYWORD
-        )
-        client.create_payload_index(
-            settings.qdrant_collection, "circular_id", PayloadSchemaType.KEYWORD
-        )
-        client.create_payload_index(
-            settings.qdrant_collection, "doc_name", PayloadSchemaType.KEYWORD
-        )
         logger.success(f"Created Qdrant collection: {settings.qdrant_collection}")
     else:
         logger.info(f"Collection '{settings.qdrant_collection}' already exists")
 
+    for field in ("category", "circular_id", "doc_name", "filename"):
+        try:
+            client.create_payload_index(
+                settings.qdrant_collection, field, PayloadSchemaType.KEYWORD
+            )
+        except Exception:
+            # Index may already exist
+            pass
 
-def embed_and_store(chunks: list[dict], batch_size: int = 32) -> int:
+
+def delete_by_filename(filename: str) -> None:
+    """Removes all vectors for a given source PDF (idempotent re-ingest)."""
+    if not filename:
+        return
+    client = get_qdrant_client()
+    ensure_collection_exists()
+    try:
+        client.delete(
+            collection_name=settings.qdrant_collection,
+            points_selector=Filter(
+                must=[FieldCondition(key="filename", match=MatchValue(value=filename))]
+            ),
+        )
+        logger.info(f"Deleted existing vectors for filename={filename}")
+    except Exception as e:
+        logger.warning(f"Delete-by-filename skipped: {e}")
+
+
+def embed_and_store(
+    chunks: list[dict],
+    batch_size: int = 32,
+    replace_existing: bool = True,
+) -> int:
     """
     Embeds chunk texts and upserts to Qdrant in batches.
-    Returns number of vectors stored.
+    When replace_existing=True, deletes prior vectors for the same filename first.
     """
+    if not chunks:
+        return 0
+
     model = get_embedding_model()
     client = get_qdrant_client()
     ensure_collection_exists()
+
+    if replace_existing:
+        filename = chunks[0].get("filename", "")
+        if filename:
+            delete_by_filename(filename)
 
     total_stored = 0
 
     for i in tqdm(range(0, len(chunks), batch_size), desc="Embedding & storing"):
         batch = chunks[i : i + batch_size]
         texts = [c["chunk_text"] for c in batch]
-
-        prefixed_texts = [f"passage: {t}" for t in texts]
-        vectors = model.encode(prefixed_texts, normalize_embeddings=True).tolist()
+        # bge-small-en-v1.5 does not use query/passage instruction prefixes
+        vectors = model.encode(texts, normalize_embeddings=True).tolist()
 
         points = [
             PointStruct(
@@ -95,7 +127,6 @@ def embed_and_store(chunks: list[dict], batch_size: int = 32) -> int:
             for chunk, vector in zip(batch, vectors)
         ]
 
-        # Retry up to 3 times on transient network timeouts
         for attempt in range(3):
             try:
                 client.upsert(
@@ -106,7 +137,9 @@ def embed_and_store(chunks: list[dict], batch_size: int = 32) -> int:
             except Exception as e:
                 if attempt < 2:
                     wait = 5 * (attempt + 1)
-                    logger.warning(f"Upsert attempt {attempt + 1} failed ({e}), retrying in {wait}s...")
+                    logger.warning(
+                        f"Upsert attempt {attempt + 1} failed ({e}), retrying in {wait}s..."
+                    )
                     time.sleep(wait)
                 else:
                     raise
@@ -117,9 +150,6 @@ def embed_and_store(chunks: list[dict], batch_size: int = 32) -> int:
 
 
 def embed_query(query: str) -> list[float]:
-    """Embeds a single query string. Uses 'query:' prefix for BGE asymmetric search."""
+    """Embeds a single query string for dense retrieval."""
     model = get_embedding_model()
-    vector = model.encode(
-        f"query: {query}", normalize_embeddings=True
-    ).tolist()
-    return vector
+    return model.encode(query, normalize_embeddings=True).tolist()

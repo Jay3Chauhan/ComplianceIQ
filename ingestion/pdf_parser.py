@@ -3,8 +3,7 @@ PDF text extraction using PyMuPDF.
 Preserves page structure and extracts metadata per page.
 """
 
-import fitz  # PyMuPDF
-import pdfplumber
+import pymupdf
 from pathlib import Path
 from loguru import logger
 
@@ -16,7 +15,7 @@ def extract_with_pymupdf(pdf_path: str) -> list[dict]:
     """
     pages: list[dict] = []
     try:
-        doc = fitz.open(pdf_path)
+        doc = pymupdf.open(pdf_path)
         for page_num in range(len(doc)):
             page = doc[page_num]
             text = page.get_text("text")
@@ -42,6 +41,12 @@ def extract_with_pdfplumber(pdf_path: str) -> list[dict]:
     Fallback extraction using pdfplumber.
     Better for tables and complex layouts.
     """
+    try:
+        import pdfplumber
+    except ImportError as e:
+        logger.error(f"pdfplumber unavailable for fallback extraction: {e}")
+        return []
+
     pages: list[dict] = []
     try:
         with pdfplumber.open(pdf_path) as pdf:
