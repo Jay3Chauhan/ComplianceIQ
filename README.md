@@ -14,6 +14,8 @@ sources before it reaches the user.
   sources) plus an LLM claim check; failing answers are repaired once.
 - **Hybrid retrieval** — dense BGE + BM25 fused in Qdrant, cross-encoder rerank, grounding gate.
 - **Conversations, feedback, search, document browser, admin uploads** via a versioned REST + SSE API.
+- **Reliable chat** — answers are saved server-side even if the browser disconnects; stop,
+  regenerate/retry, edit-and-resend, follow-up suggestions, AI titles and Markdown/JSON export.
 - **Streamlit UI** today; a Next.js frontend is specified in [docs/FRONTEND_NEXTJS.md](docs/FRONTEND_NEXTJS.md).
 
 | Metric (eval set) | v1 | v2 |

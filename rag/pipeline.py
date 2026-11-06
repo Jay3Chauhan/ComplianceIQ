@@ -197,7 +197,11 @@ def answer(req: RAGRequest) -> RAGResponse:
     report: VerificationReport | None = None
     revised = False
     if mode == "regulatory":
-        if is_refusal(text):
+        if is_refusal(text) and req.answer_mode == "auto":
+            mode, chunks = "general", []
+            completion = groq_client.complete(_messages(mode, req.question, [], req.history))
+            text = completion.content.strip()
+        elif is_refusal(text):
             mode, chunks, text = "not_found", [], NOT_FOUND_ANSWER
         elif _should_verify(req):
             t_ver = time.perf_counter()
@@ -221,6 +225,33 @@ def answer(req: RAGRequest) -> RAGResponse:
         latency_ms=round((time.perf_counter() - t0) * 1000),
         **base,
     )
+
+
+def _generate(messages: list[dict], mode: str, out: dict) -> Iterator[dict]:
+    """Streams one completion as pipeline events; fills out["text"] and out["model"], or sets out["failed"]."""
+    parts: list[str] = []
+    writing = False
+    out["model"] = None
+    for event in groq_client.stream(messages):
+        if event["type"] == "model":
+            out["model"] = event["model"]
+        elif event["type"] == "fallback":
+            yield {"type": "status", "stage": "thinking",
+                   "message": "The primary model is busy, switching to a backup model…"}
+        elif event["type"] == "token":
+            if not writing:
+                writing = True
+                yield {"type": "status", "stage": "writing", "message": "Writing answer…"}
+            parts.append(event["content"])
+            yield event
+        elif event["type"] == "error":
+            out["failed"] = True
+            yield event
+            return
+    raw = "".join(parts).strip()
+    out["text"] = groq_client.clean_text(raw)
+    if out["text"] != raw:
+        yield {"type": "revision", "answer": out["text"], "mode": mode, "reason": "format"}
 
 
 def stream(req: RAGRequest) -> Iterator[dict]:
@@ -256,30 +287,28 @@ def stream(req: RAGRequest) -> Iterator[dict]:
             return
 
         yield {"type": "status", "stage": "thinking", "message": "Reading the sources…" if chunks else "Thinking…"}
-        parts: list[str] = []
-        model: str | None = None
-        writing = False
-        for event in groq_client.stream(_messages(mode, req.question, chunks, req.history)):
-            if event["type"] == "model":
-                model = event["model"]
-            elif event["type"] == "token":
-                if not writing:
-                    writing = True
-                    yield {"type": "status", "stage": "writing", "message": "Writing answer…"}
-                parts.append(event["content"])
-                yield event
-            elif event["type"] == "error":
-                yield event
-                return
+        gen: dict = {}
+        yield from _generate(_messages(mode, req.question, chunks, req.history), mode, gen)
+        if gen.get("failed"):
+            return
+        text, model = gen["text"], gen["model"]
 
-        raw = "".join(parts).strip()
-        text = groq_client.clean_text(raw)
-        if text != raw:
-            yield {"type": "revision", "answer": text, "mode": mode}
         report: VerificationReport | None = None
         if mode == "regulatory" and is_refusal(text):
-            mode = "not_found"
-            yield {"type": "revision", "answer": NOT_FOUND_ANSWER, "mode": mode, "sources": []}
+            if req.answer_mode == "auto":
+                mode, chunks = "general", []
+                yield {"type": "revision", "answer": "", "mode": mode, "sources": [], "reason": "general_fallback"}
+                yield {"type": "status", "stage": "thinking",
+                       "message": "Not covered by the loaded documents — answering from general knowledge…"}
+                gen = {}
+                yield from _generate(_messages(mode, req.question, [], req.history), mode, gen)
+                if gen.get("failed"):
+                    return
+                text, model = gen["text"], gen["model"]
+            else:
+                mode = "not_found"
+                yield {"type": "revision", "answer": NOT_FOUND_ANSWER, "mode": mode, "sources": [],
+                       "reason": "not_found"}
         elif mode == "regulatory" and _should_verify(req):
             yield {"type": "status", "stage": "verifying", "message": "Checking every claim against the sources…"}
             report = verify_answer(text, chunks)
@@ -289,7 +318,7 @@ def stream(req: RAGRequest) -> Iterator[dict]:
                 fixed = _repair(req.question, text, chunks, report)
                 if fixed:
                     text, report = fixed
-                    yield {"type": "revision", "answer": text, "mode": mode}
+                    yield {"type": "revision", "answer": text, "mode": mode, "reason": "repair"}
             yield {"type": "verification", **report.to_dict(), "final": True}
 
         yield {

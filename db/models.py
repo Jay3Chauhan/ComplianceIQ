@@ -47,8 +47,9 @@ class Message(Base):
     )
     role: Mapped[str] = mapped_column(String(16))  # user | assistant
     content: Mapped[str] = mapped_column(Text, default="")
-    status: Mapped[str] = mapped_column(String(16), default="complete")  # complete | error
+    status: Mapped[str] = mapped_column(String(16), default="complete")  # complete | error | stopped
     mode: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    followups: Mapped[list | None] = mapped_column(JSON, nullable=True)
     sources: Mapped[list | None] = mapped_column(JSON, nullable=True)
     verification: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     confidence: Mapped[str | None] = mapped_column(String(16), nullable=True)

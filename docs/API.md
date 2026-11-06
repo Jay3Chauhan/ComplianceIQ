@@ -19,14 +19,35 @@ Every response carries `X-Request-ID` (send your own to correlate logs) and `X-R
 
 ## Rate limits
 
-`POST /chat`, `/chat/stream`, `/search` and legacy `/query*` share a sliding window
-of `RATE_LIMIT_PER_MINUTE` (default 30) per API key + user. Exceeding it returns
-`429 rate_limited` with `Retry-After`. The limiter is in-memory: use one instance
-or put a Redis limiter in front when scaling out.
+`POST /chat`, `/chat/stream`, `/messages/{id}/regenerate`, `/messages/{id}/edit`,
+`/search` and legacy `/query*` share a sliding window of `RATE_LIMIT_PER_MINUTE`
+(default 30) per API key + user. Exceeding it returns `429 rate_limited` with
+`Retry-After`. The limiter is in-memory: use one instance or put a Redis limiter in
+front when scaling out.
 
 The upstream LLM (Groq free tier) has its own limit of about 8K tokens/minute per
-model. When every model is exhausted, chat returns `503 llm_unavailable` (or an SSE
-`error` event with `code: "rate_limited"`).
+model. When a model is rate limited the next fallback model is used (the stream
+shows "switching to a backup model…"). When every model is exhausted, chat returns
+`503 llm_unavailable` (or an SSE `error` event with `code: "rate_limited"`).
+
+## Conversation rules
+
+- **One answer at a time per conversation.** While an answer is being generated,
+  another chat/regenerate/edit in the same conversation returns `409
+  conversation_busy`. `GET /conversations/{id}` reports `streaming: true` meanwhile.
+  Stop it with `POST /conversations/{id}/stop` or wait.
+- **Answers are saved by the server, not the client.** If the client disconnects
+  (tab closed, network drop, fetch aborted) generation stops and the partial answer
+  is saved with `status: "stopped"`. A failure saves the partial answer with
+  `status: "error"`. Both can be retried with `regenerate`.
+- **Sticky settings.** The `category` and `answer_mode` of each request are saved on
+  the conversation, so the next turn (and regenerate) reuse them.
+- **Titles.** A new conversation is titled from the first question, then replaced
+  by a short AI title after the first answer (`title` event / field). A title the
+  user set with `PATCH` is never overwritten. Editing the first question re-titles
+  only if the title is still the automatic one.
+- The run registry is in-process: run a single API instance, or pin a conversation
+  to one instance (sticky sessions).
 
 ## Errors
 
@@ -46,10 +67,10 @@ All errors use one envelope:
 
 | Status | Codes |
 |---|---|
-| 400 | `bad_request`, `invalid_user_id`, `invalid_page`, `empty_file` |
+| 400 | `bad_request`, `invalid_user_id`, `invalid_page`, `empty_file`, `invalid_message` (regenerate needs an assistant message, edit a user message) |
 | 401 | `unauthorized` |
 | 404 | `conversation_not_found`, `message_not_found`, `feedback_not_found`, `document_not_found`, `file_not_found`, `job_not_found`, `not_found` |
-| 409 | `document_exists`, `job_running` |
+| 409 | `conversation_busy`, `document_exists`, `job_running` |
 | 413 | `file_too_large` |
 | 415 | `invalid_file` |
 | 422 | `validation_error` — `details: [{field, message}]` |
@@ -67,13 +88,18 @@ All errors use one envelope:
 | GET | `/api/v1/suggestions` | `category`, `limit` | `{category, suggestions[]}` |
 | POST | `/api/v1/chat` | `ChatRequest` | `ChatResponse` |
 | POST | `/api/v1/chat/stream` | `ChatRequest` | `text/event-stream` (see below) |
+| POST | `/api/v1/messages/{id}/regenerate` | `RegenerateRequest` (optional) | SSE. `id` = assistant message. Replaces it and removes every later message. Also "retry" for `error`/`stopped` answers. |
+| POST | `/api/v1/messages/{id}/edit` | `EditRequest` | SSE. `id` = user message. Replaces the question, removes every later message, answers it. |
+| GET | `/api/v1/messages/{id}` | – | `Message` (sources, verification, follow-ups, your feedback) |
 | PUT | `/api/v1/messages/{id}/feedback` | `{rating: 1\|-1, reasons?, comment?}` | `FeedbackResponse` |
 | DELETE | `/api/v1/messages/{id}/feedback` | – | 204 |
 | GET | `/api/v1/conversations` | `limit`, `offset`, `q`, `archived` | `{items, total, limit, offset}` |
 | POST | `/api/v1/conversations` | `{title?, category, answer_mode}` | `Conversation` (201) |
-| GET | `/api/v1/conversations/{id}` | – | `Conversation` + `messages[]` |
+| GET | `/api/v1/conversations/{id}` | – | `Conversation` + `messages[]` + `streaming` |
 | PATCH | `/api/v1/conversations/{id}` | `{title?, pinned?, archived?, category?, answer_mode?}` | `Conversation` |
-| DELETE | `/api/v1/conversations/{id}` | – | 204 |
+| POST | `/api/v1/conversations/{id}/stop` | – | `{conversation_id, stopped}`; `stopped: false` when nothing was running |
+| GET | `/api/v1/conversations/{id}/export` | `format=markdown\|json` | File download (`Content-Disposition: attachment`) with answers, verification and full citations |
+| DELETE | `/api/v1/conversations/{id}` | – | 204 (stops a running answer first) |
 | DELETE | `/api/v1/conversations` | – | `{deleted: n}` (all of this user's) |
 | POST | `/api/v1/search` | `{query, category, top_k≤20, rerank}` | `{query, search_query, grounded, gate_score, results: Source[], timings}` |
 | GET | `/api/v1/documents` | `category` | `DocumentSummary[]` |
@@ -102,13 +128,14 @@ All errors use one envelope:
   "top_k": 6,
   "history": null,
   "verify": null,
-  "save": true
+  "save": true,
+  "followups": true
 }
 ```
 
 | Field | Notes |
 |---|---|
-| `question` | 3–2000 chars |
+| `question` | 3–2000 chars (trimmed) |
 | `conversation_id` | Continue a saved conversation; history is loaded server-side |
 | `category` | `ALL` · `RBI` · `SEBI` · `AA` |
 | `answer_mode` | `auto` (cited when grounded, else general) · `regulatory` (cited or not-found) · `general` (no retrieval) |
@@ -116,6 +143,17 @@ All errors use one envelope:
 | `history` | Stateless clients only: `[{question, answer}]`, max 10. Ignored with `conversation_id`. |
 | `verify` | Override verification (default on) |
 | `save` | `false` → nothing persisted, `conversation_id` in the response is `null` |
+| `followups` | Suggest up to 3 next questions after the answer (default `true`) |
+
+### RegenerateRequest / EditRequest
+
+```json
+{ "category": null, "answer_mode": null, "top_k": null, "verify": null, "followups": true }
+```
+
+Every field is optional; omitted `category`/`answer_mode` reuse the conversation's
+settings, given ones are saved on the conversation. `EditRequest` adds the required
+`"question"` (3–2000 chars). Both stream exactly like `/chat/stream`.
 
 ### ChatResponse
 
@@ -164,14 +202,44 @@ All errors use one envelope:
   "standalone_question": "How often must KYC be updated for high-risk customers?",
   "model": "openai/gpt-oss-120b",
   "latency_ms": 4090,
-  "timings": {"search_ms": 310, "rerank_ms": 1800, "total_ms": 2150, "generation_ms": 1500, "verification_ms": 480}
+  "timings": {"search_ms": 310, "rerank_ms": 1800, "total_ms": 2150, "generation_ms": 1500, "verification_ms": 480},
+  "followups": ["What triggers an immediate KYC update?", "How are customer risk categories determined?"],
+  "title": "Periodic KYC Update Timelines"
 }
 ```
 
 `[n]` in `answer` refers to `sources[n-1].id == n`. `mode` is `regulatory`,
-`general` or `not_found`. `confidence` is `null` for `not_found`.
+`general` or `not_found`. `confidence` is `null` for `not_found`. `title` is set
+only when this exchange changed the conversation title. `followups` is empty when
+disabled; for `not_found` answers it holds starter questions that the documents do cover.
+
+In `auto` mode, if the documents look relevant but the model finds they don't
+actually answer the question, the API falls back to a general-knowledge answer
+(`mode: "general"`, no sources, `confidence: "low"`) instead of a refusal. In
+`regulatory` mode the same case returns `not_found`.
+
+### Message
+
+```json
+{
+  "id": "…", "conversation_id": "…", "role": "assistant",
+  "content": "…", "status": "complete",
+  "mode": "regulatory", "followups": ["…"], "sources": [/* Source */], "verification": {/* … */},
+  "confidence": "high", "revised": false, "standalone_question": "…",
+  "model": "openai/gpt-oss-120b", "latency_ms": 4090, "created_at": "2026-11-06T10:12:03Z",
+  "feedback": {"rating": 1, "reasons": [], "comment": null}
+}
+```
+
+`status`: `complete` · `stopped` (cut short by the user or a disconnect; `content` is
+the partial answer) · `error` (generation failed; `content` may be partial). User
+messages are always `complete`.
 
 ## Streaming: `POST /api/v1/chat/stream`
+
+`/messages/{id}/regenerate` and `/messages/{id}/edit` use the same protocol.
+Validation, `404` and `409 conversation_busy` errors are returned as normal JSON
+responses **before** the stream starts, so check `response.ok` first.
 
 Server-Sent Events. Each frame:
 
@@ -180,22 +248,69 @@ event: <type>
 data: {"type": "<type>", …}
 ```
 
+Lines starting with `:` (`: ping`) are heartbeats, sent every
+`SSE_HEARTBEAT_SECONDS` (default 10, see `/meta` `limits.sse_heartbeat_seconds`) while
+the server is busy without output. Ignore them. They keep proxies from closing idle
+connections and let the server notice a disconnected client.
+
 | Event | Payload | Client action |
 |---|---|---|
-| `conversation` | `{conversation_id, user_message_id}` | First frame when `save` is true. Update the URL / sidebar. |
-| `status` | `{stage, message}` with stage `understanding` · `searching` · `thinking` · `writing` · `verifying` · `revising` | Show progress text. |
-| `retrieval` | `{mode, grounded, gate_score, standalone_question, sources, timings}` | Render the sources panel before tokens arrive. |
+| `conversation` | `{conversation_id, user_message_id}` | First frame for saved chats. Update the URL / sidebar, attach the id to the user bubble. |
+| `status` | `{stage, message}` with stage `understanding` · `searching` · `thinking` · `writing` · `verifying` · `revising` | Show `message` as progress text. |
+| `retrieval` | `{mode, grounded, gate_score, standalone_question, sources, timings}` | Render the sources before tokens arrive. |
 | `token` | `{content}` | Append to the answer. |
-| `revision` | `{answer, mode, sources?}` | **Replace** the streamed answer (normalised text, repaired answer, or refusal). |
+| `revision` | `{answer, mode, reason, sources?}` | **Replace** the answer text with `answer`; later tokens append to it. If `sources` is present, replace the sources. |
 | `verification` | `Verification` + `final: bool` | `final: false` precedes a repair; show the badge on `final: true`. |
-| `done` | `{message_id, mode, answer, confidence, model, latency_ms}` | Authoritative final answer. Enable feedback with `message_id`. |
-| `error` | `{code, message}` | `rate_limited`, `llm_error`, `internal_error`. The stream ends. |
+| `followups` | `{followups: string[]}` | Show suggested next questions as chips. |
+| `title` | `{conversation_id, title}` | Update the conversation title in the sidebar/header. |
+| `error` | `{code, message}` | `rate_limited`, `llm_error`, `internal_error`. No more content follows; `done` still arrives. |
+| `done` | `{status, message_id, conversation_id, mode, answer, confidence, model, latency_ms}` | **Always the last frame.** `status`: `complete` · `stopped` · `error`. `answer` is the saved text. Use `message_id` for feedback, regenerate and copy. |
 
-Typical order: `conversation → status(searching) → retrieval → status(thinking) →
-status(writing) → token* → [revision] → status(verifying) → verification → done`.
-For a `not_found` answer: `retrieval → token → done` with no LLM call.
+`revision.reason`:
 
-The exchange is persisted even if the client disconnects mid-stream.
+| `reason` | Meaning | UI |
+|---|---|---|
+| `format` | Typography cleanup of the streamed text | Swap silently |
+| `repair` | Fact-check found unsupported claims; corrected answer | Crossfade + "Refined after fact-check" |
+| `not_found` | Model said the documents don't cover it (`regulatory` mode) | Show the not-found card, drop sources |
+| `general_fallback` | Same, in `auto` mode: `answer` is `""`, `sources` `[]`, and a general-knowledge answer streams next | Clear the text, switch to the general-knowledge banner |
+
+Typical order:
+
+```
+conversation → status(searching) → retrieval → status(thinking) → status(writing) → token*
+  → [revision(format)] → status(verifying) → [verification(final:false) → status(revising) → revision(repair)]
+  → verification(final:true) → followups → [title] → done(complete)
+```
+
+- `not_found` without an LLM call: `retrieval → token (the refusal text) → [followups] → done`.
+- Follow-up questions add `status(understanding)` before `searching`.
+- Model fallback adds `status(thinking, "The primary model is busy, switching to a backup model…")`.
+- Stopped: the stream ends with `done(status: "stopped")` holding the partial answer; no `followups`/`title`.
+- Failure: `error → done(status: "error")`.
+
+## Stop, regenerate, edit, export
+
+```bash
+# Stop the running answer (the open stream ends with done.status = "stopped")
+curl -s -X POST http://localhost:8000/api/v1/conversations/<id>/stop -H "X-API-Key: $KEY" -H "X-User-Id: user-42"
+
+# Regenerate / retry an assistant answer (SSE)
+curl -N -X POST http://localhost:8000/api/v1/messages/<assistant_message_id>/regenerate \
+  -H "X-API-Key: $KEY" -H "X-User-Id: user-42" -H "Content-Type: application/json" -d '{"answer_mode":"regulatory"}'
+
+# Edit a question and re-answer (SSE)
+curl -N -X POST http://localhost:8000/api/v1/messages/<user_message_id>/edit \
+  -H "X-API-Key: $KEY" -H "X-User-Id: user-42" -H "Content-Type: application/json" \
+  -d '{"question":"What is the cooling-off period for digital loans?"}'
+
+# Export
+curl -s -OJ "http://localhost:8000/api/v1/conversations/<id>/export?format=markdown" -H "X-API-Key: $KEY" -H "X-User-Id: user-42"
+```
+
+Aborting the HTTP request has the same effect as `stop`: generation ends at the
+next step (usually within a second; up to a few seconds while searching or
+fact-checking) and the partial answer is saved as `stopped`.
 
 ## Examples
 
@@ -247,5 +362,7 @@ PowerShell users: use `curl.exe` and `--data-binary "@body.json"` to avoid quoti
 python scripts/smoke_test.py --base http://localhost:8000 --api-key <key> --admin-key <admin-key>
 ```
 
-Runs 12 live checks (readiness, grounded answer, follow-up rewrite, refusal,
-documents, pages, outline, search, feedback, conversations, admin stats).
+Runs 19 live checks against real Qdrant and Groq: readiness, a grounded answer
+(saved, with follow-ups and an AI title), follow-up rewrite, regenerate, stop
+mid-answer, edit, export, out-of-scope refusal, auto-mode general fallback,
+documents, pages, outline, search, feedback, conversations and admin stats.

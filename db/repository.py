@@ -45,6 +45,7 @@ def message_dict(m: Message, feedback: Feedback | None = None) -> dict:
         "content": m.content,
         "status": m.status,
         "mode": m.mode,
+        "followups": m.followups or [],
         "sources": m.sources or [],
         "verification": m.verification,
         "confidence": m.confidence,
@@ -161,15 +162,13 @@ def add_message(conversation_id: str, role: str, content: str, **fields) -> dict
         return message_dict(m)
 
 
-def history_for_rag(conversation_id: str, turns: int = 3) -> list[dict]:
-    """Last N (question, answer) pairs, oldest first."""
+def history_for_rag(conversation_id: str, turns: int = 3, before: datetime | None = None) -> list[dict]:
+    """Last N completed (question, answer) pairs, oldest first; optionally only before a point in time."""
     with session_scope() as s:
-        msgs = s.scalars(
-            select(Message)
-            .where(Message.conversation_id == conversation_id, Message.status == "complete")
-            .order_by(Message.created_at.desc())
-            .limit(turns * 2)
-        ).all()
+        stmt = select(Message).where(Message.conversation_id == conversation_id, Message.status == "complete")
+        if before is not None:
+            stmt = stmt.where(Message.created_at < before)
+        msgs = s.scalars(stmt.order_by(Message.created_at.desc()).limit(turns * 2)).all()
     msgs = list(reversed(msgs))
     history: list[dict] = []
     pending: str | None = None
@@ -187,7 +186,87 @@ def get_message(user_id: str, message_id: str) -> dict | None:
         m = s.get(Message, message_id)
         if not m or m.conversation.user_id != user_id:
             return None
-        return message_dict(m)
+        fb = s.scalar(select(Feedback).where(Feedback.message_id == m.id, Feedback.user_id == user_id))
+        return message_dict(m, fb)
+
+
+def _delete_from(s, c: Conversation, start: datetime, inclusive: bool) -> int:
+    later = [m for m in c.messages if (m.created_at >= start if inclusive else m.created_at > start)]
+    for m in later:
+        s.delete(m)
+    c.message_count = max(0, c.message_count - len(later))
+    return len(later)
+
+
+def _is_first_user_message(c: Conversation, m: Message) -> bool:
+    return next((x.id for x in c.messages if x.role == "user"), None) == m.id
+
+
+def rewind_for_regenerate(user_id: str, message_id: str) -> dict | None:
+    """
+    Deletes an assistant message and everything after it, returning the question to
+    answer again: {conversation, user_message, history, first_exchange}.
+    Returns None if the message doesn't exist for this user; raises ValueError if it
+    isn't an assistant message with a preceding question.
+    """
+    with session_scope() as s:
+        m = s.get(Message, message_id)
+        if not m or m.conversation.user_id != user_id:
+            return None
+        if m.role != "assistant":
+            raise ValueError("Only assistant messages can be regenerated.")
+        c = m.conversation
+        question = next((x for x in reversed(c.messages) if x.role == "user" and x.created_at <= m.created_at), None)
+        if question is None:
+            raise ValueError("No question precedes this answer.")
+        _delete_from(s, c, m.created_at, inclusive=True)
+        c.updated_at = utcnow()
+        s.flush()
+        result = {
+            "conversation": conversation_dict(c),
+            "user_message": message_dict(question),
+            "first_exchange": _is_first_user_message(c, question),
+            "before": question.created_at,
+        }
+    result["history"] = history_for_rag(result["conversation"]["id"], before=result.pop("before"))
+    return result
+
+
+def rewind_for_edit(user_id: str, message_id: str, new_question: str) -> dict | None:
+    """Replaces a user question and deletes everything after it (same shape as rewind_for_regenerate)."""
+    with session_scope() as s:
+        m = s.get(Message, message_id)
+        if not m or m.conversation.user_id != user_id:
+            return None
+        if m.role != "user":
+            raise ValueError("Only user messages can be edited.")
+        c = m.conversation
+        old_question = m.content
+        _delete_from(s, c, m.created_at, inclusive=False)
+        m.content = new_question
+        first = _is_first_user_message(c, m)
+        if first and c.title == _title_from(old_question):
+            c.title = _title_from(new_question)
+        c.updated_at = utcnow()
+        s.flush()
+        result = {
+            "conversation": conversation_dict(c),
+            "user_message": message_dict(m),
+            "first_exchange": first,
+            "before": m.created_at,
+        }
+    result["history"] = history_for_rag(result["conversation"]["id"], before=result.pop("before"))
+    return result
+
+
+def set_auto_title(conversation_id: str, title: str, question: str) -> str | None:
+    """Sets an AI title unless the user renamed the conversation. Returns the new title."""
+    with session_scope() as s:
+        c = s.get(Conversation, conversation_id)
+        if not c or c.title not in ("New conversation", _title_from(question)):
+            return None
+        c.title = title[:TITLE_MAX]
+        return c.title
 
 
 # ── Feedback ─────────────────────────────────────────────────────────────────

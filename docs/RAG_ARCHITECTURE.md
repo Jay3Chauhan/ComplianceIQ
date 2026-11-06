@@ -67,8 +67,8 @@ Measured on `evaluation/test_questions.json` (30 in-scope, 8 out-of-scope):
 
 | Answer mode (request) | Behaviour |
 |---|---|
-| `auto` (default) | Grounded → regulatory answer with citations; not grounded → general finance answer, clearly labelled. |
-| `regulatory` | Grounded → cited answer; otherwise the fixed "not found" answer, **no LLM call**. |
+| `auto` (default) | Grounded → regulatory answer with citations; not grounded → general finance answer, clearly labelled. If the gate passes but the model refuses (the passages are related but don't answer it, e.g. "What is a SIP?"), the answer falls back to a general answer instead of "not found". Streaming clients get `revision{reason:"general_fallback", answer:""}` and then the general answer's tokens. |
+| `regulatory` | Grounded → cited answer; otherwise the fixed "not found" answer, **no LLM call**. A model refusal also becomes `not_found`. |
 | `general` | Skips retrieval. |
 
 Response `mode` is `regulatory`, `general` or `not_found`.
@@ -85,7 +85,7 @@ A refusal sentence only turns the answer into `not_found` when the answer has **
 | Rewrite + claim check | `qwen/qwen3.8-27b` | Non-reasoning, ~0.4 s, JSON mode, separate rate-limit bucket. |
 | Fallbacks (in order) | `openai/gpt-oss-20b`, `qwen/qwen3.8-27b` | Used on 429 or when a model is retired (404). |
 
-Free tier: **8K tokens/minute per model**. One verified answer costs roughly 3–4K tokens on the answer model plus ~2K on the verifier model, so splitting roles across models is what keeps verification from being rate limited. Groq reserves `max_completion_tokens` against that limit, so reasoning models get `LLM_REASONING_ALLOWANCE` on top of the visible budget and non-reasoning models don't.
+Free tier: **8K tokens/minute per model**. One verified answer costs roughly 3–4K tokens on the answer model plus ~2K on the verifier model, so splitting roles across models is what keeps verification from being rate limited. Follow-up suggestions and the first-exchange title come from one extra fast-model JSON call (~0.5K tokens, `llm/followups.py`). Disable with `ENABLE_FOLLOWUPS=false` / `ENABLE_LLM_TITLES=false`; failures are silent. Groq reserves `max_completion_tokens` against that limit, so reasoning models get `LLM_REASONING_ALLOWANCE` on top of the visible budget and non-reasoning models don't.
 
 Model output is normalised (`clean_text`): non-breaking hyphens/spaces → ASCII, `【n】` and `[n†…]` → `[n]`.
 
@@ -102,6 +102,20 @@ Model output is normalised (`clean_text`): non-breaking hyphens/spaces → ASCII
 5. **Confidence** — `high` (verified and gate ≥ 0.5), `medium`, `low` (general mode or unverified).
 
 If the verifier model is unavailable the rule checks still run (`method: "rules"`).
+
+## 4b. Chat reliability (`api/services/chat.py`, `api/services/runs.py`)
+
+```
+POST /chat/stream ─► prepare (validate, 404/409, save user message, reserve the conversation)
+                  ─► worker thread: pipeline.stream → events → queue      (owns persistence)
+                  ─► SSE relay: queue → frames, ": ping" every 10 s idle  (owns the connection)
+```
+
+- **The worker saves the answer.** It runs whether or not anyone is listening, so a closed tab never loses an exchange. The saved status is `complete`, `stopped` (cancelled; the partial text is kept) or `error`.
+- **Cancellation.** A client disconnect (noticed when a heartbeat or frame fails to send) or `POST /conversations/{id}/stop` sets the job's cancel flag. The worker stops at the next pipeline event and closes the Groq stream, so no more tokens are paid for.
+- **One run per conversation.** An in-process registry rejects a concurrent answer with `409 conversation_busy` and reports `streaming` on the conversation. It is per process: run one API instance or use sticky sessions.
+- **Regenerate / edit** rewind the conversation (delete the old answer and later messages, or replace the question) and rebuild the history from what remains, so follow-up rewriting sees exactly the turns before the question.
+- **`done` is always the last frame**, with the saved `message_id`, so clients can Retry stopped or failed answers.
 
 ## 5. Evaluation (`evaluation/run_eval.py`)
 
@@ -143,6 +157,8 @@ Reports are written to `evaluation/results/` (gitignored).
 | `ENABLE_LLM_VERIFIER` | true | Off → rule checks only, saves ~2K tokens/answer |
 | `ENABLE_ANSWER_REPAIR` | true | Off → never rewrites, just reports |
 | `LLM_REASONING_EFFORT` | low | `medium` improves hard questions at ~2× tokens/latency |
+| `ENABLE_FOLLOWUPS` / `ENABLE_LLM_TITLES` | true | Suggested next questions / AI conversation titles (one fast-model call) |
+| `SSE_HEARTBEAT_SECONDS` | 10 | Idle heartbeat interval; also bounds how quickly a disconnect is noticed |
 
 ## 7. Known limits / next steps
 

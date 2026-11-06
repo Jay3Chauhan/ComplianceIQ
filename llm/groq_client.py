@@ -174,11 +174,16 @@ def stream(
       {"type": "token", "content": str}
       {"type": "model", "model": str}       (once, before the first token)
       {"type": "error", "code": str, "message": str}
-    Falls back to the secondary model only if no tokens were emitted yet.
+      {"type": "fallback", "model": str}    (switching to a backup model)
+    Falls back to the next model only if no tokens were emitted yet. Closing the
+    generator (e.g. the user pressed stop) closes the HTTP stream to Groq.
     """
     last_error = ""
-    for name in _models(model):
+    for index, name in enumerate(_models(model)):
         emitted = False
+        s = None
+        if index:
+            yield {"type": "fallback", "model": name}
         try:
             s = get_groq_client().chat.completions.create(
                 model=name,
@@ -208,6 +213,12 @@ def stream(
                 yield {"type": "error", "code": "llm_error", "message": "The language model failed to respond."}
                 return
             last_error = str(e)
+        finally:
+            if s is not None:
+                try:
+                    s.close()
+                except Exception:
+                    pass
     yield {
         "type": "error",
         "code": "rate_limited",

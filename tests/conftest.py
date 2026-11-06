@@ -13,6 +13,8 @@ os.environ["ENABLE_RERANK"] = "false"
 os.environ["ENABLE_LLM_VERIFIER"] = "false"
 os.environ["ENABLE_QUERY_REWRITE"] = "false"
 os.environ["RATE_LIMIT_PER_MINUTE"] = "1000"
+os.environ["ENABLE_FOLLOWUPS"] = "false"
+os.environ["ENABLE_LLM_TITLES"] = "false"
 if os.getenv("RUN_INTEGRATION") != "1":
     # Unit runs never touch real services; integration runs read credentials from .env
     os.environ.setdefault("GROQ_API_KEY", "test")

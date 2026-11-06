@@ -71,12 +71,39 @@ def test_auto_mode_without_grounding_falls_back_to_general(monkeypatch, fake_llm
     assert "GENERAL KNOWLEDGE" in fake_llm[0][0][0]["content"]
 
 
+REFUSAL = "The loaded documents do not contain enough information to answer this question."
+
+
 def test_model_refusal_becomes_not_found(monkeypatch, fake_llm, sample_chunks) -> None:
     _patch_retrieval(monkeypatch, sample_chunks, True)
-    fake_llm[1].append("The loaded documents do not contain enough information to answer this question.")
-    res = pipeline.answer(RAGRequest(question="What is the penalty for late updation?"))
+    fake_llm[1].append(REFUSAL)
+    res = pipeline.answer(RAGRequest(question="What is the penalty for late updation?", answer_mode="regulatory"))
     assert res.mode == "not_found"
     assert res.sources == []
+
+
+def test_auto_mode_refusal_falls_back_to_general(monkeypatch, fake_llm, sample_chunks) -> None:
+    _patch_retrieval(monkeypatch, sample_chunks, True)
+    fake_llm[1].extend([REFUSAL, "A SIP invests a fixed amount at regular intervals."])
+    res = pipeline.answer(RAGRequest(question="What is a SIP?"))
+    assert res.mode == "general" and res.confidence == "low"
+    assert res.sources == [] and res.verification is None
+    assert res.answer.startswith("A SIP")
+    assert "GENERAL KNOWLEDGE" in fake_llm[0][1][0]["content"]
+
+
+def test_stream_auto_refusal_resets_text_then_answers_generally(monkeypatch, fake_llm, sample_chunks) -> None:
+    _patch_retrieval(monkeypatch, sample_chunks, True)
+    fake_llm[1].extend([REFUSAL, "A SIP invests a fixed amount at regular intervals."])
+    events = list(pipeline.stream(RAGRequest(question="What is a SIP?")))
+    reset = next(e for e in events if e["type"] == "revision")
+    assert reset == {"type": "revision", "answer": "", "mode": "general", "sources": [],
+                     "reason": "general_fallback"}
+    after = events[events.index(reset):]
+    assert "".join(e["content"] for e in after if e["type"] == "token").startswith("A SIP")
+    assert not any(e["type"] == "verification" for e in events)
+    done = events[-1]
+    assert done["mode"] == "general" and done["answer"].startswith("A SIP") and done["confidence"] == "low"
 
 
 def test_cited_partial_answer_is_not_treated_as_refusal(monkeypatch, fake_llm, sample_chunks) -> None:

@@ -248,14 +248,11 @@ def stream_query(
                     meta["mode"] = ev.get("mode", meta["mode"])
                     if "sources" in ev:
                         meta["sources"] = ev["sources"]
-                    # Revisions also normalize typography; only a repair pass counts as a correction
-                    meta["revised"] = meta.get("repairing", False) and meta["mode"] != "not_found"
+                    meta["revised"] = meta["revised"] or ev.get("reason") == "repair"
                     yield ("revision", ev.get("answer", ""))
                 elif kind == "verification":
                     if ev.get("final", True):
                         meta["verification"] = ev
-                    else:
-                        meta["repairing"] = True
                 elif kind == "usage":
                     if ev.get("usage"):
                         meta["usage"] = ev["usage"]

@@ -41,7 +41,8 @@ Browser ──▶ Next.js (App Router)
 - The browser **never** calls FastAPI directly and never sees `X-API-Key` or `X-Admin-Key`. All calls go through Next.js route handlers (`/app/api/...`), which attach the headers server-side.
 - `X-User-Id` comes from the authenticated session (e.g. `session.user.id`). The backend scopes conversations and feedback by it.
 - Admin routes check the user's role in Next.js **and** attach `X-Admin-Key` only for admins.
-- Streaming (`/api/v1/chat/stream`) is proxied by piping the upstream `ReadableStream` straight through (see §9.2).
+- Streaming (`/chat/stream`, `/messages/{id}/regenerate`, `/messages/{id}/edit`) is proxied by piping the upstream `ReadableStream` straight through, and aborts propagate to the backend (see §9.2).
+- The backend owns generation and persistence. The browser only displays the stream, so closing a tab never loses a saved exchange (§6.11).
 
 ### 2.1 Tech stack
 
@@ -193,9 +194,10 @@ Deep links:
   - **Regulator selector:** `All · RBI · SEBI · AA`, sourced from `GET /meta` categories.
   - **Answer mode selector:** `Auto · Documents only · General knowledge`, each with a one-line description from `/meta.answer_modes`.
   - **Send button.** While streaming it becomes a **Stop** button.
-- **Keys:** `Enter` sends, `Shift+Enter` inserts a newline, `Esc` stops the stream, `↑` in an empty composer edits the last question.
-- **Disabled while streaming.** Stop aborts the fetch (§9.3). The partial answer is kept and marked "Stopped".
-- **Persistence:** regulator and mode are remembered per conversation (`PATCH /conversations/{id}`). New chats start from the defaults in `/settings`.
+- **Keys:** `Enter` sends, `Shift+Enter` inserts a newline, `Esc` stops the stream, `↑` in an empty composer edits the last question (§6.9).
+- **One answer at a time.** Sending is disabled while an answer streams in this conversation; the backend enforces the same rule with `409 conversation_busy` (§6.10).
+- **Stop** (§9.6) aborts the fetch **and** calls `POST /conversations/{id}/stop`. The partial answer stays on screen with a "Stopped" label and a **Continue/Retry** action; the server saves it with `status: "stopped"`.
+- **Persistence:** the regulator and mode sent with each message are saved on the conversation by the backend (no extra `PATCH`). When opening a conversation, initialise the selectors from `conversation.category` / `conversation.answer_mode`. New chats start from the defaults in `/settings`.
 
 ### 6.2 Streaming stages → UI
 
@@ -211,7 +213,13 @@ Drive a single **status line** above the streaming answer from `status` events. 
 | `revising` | Fixing unsupported statements… | `Wand2` (pulse) |
 | *(done)* | status line disappears; badges render | — |
 
+Two `thinking` messages carry extra meaning; show the backend `message` verbatim:
+- "The primary model is busy, switching to a backup model…": a rate-limit fallback; nothing to do.
+- "Not covered by the loaded documents — answering from general knowledge…": arrives with `revision{reason:"general_fallback"}` (§8.2). Switch the message to the general-knowledge banner.
+
 After the `retrieval` event, show **"Found N sources"** chips immediately, before any tokens arrive, so the user sees evidence first.
+
+If no event arrives for `2 × limits.sse_heartbeat_seconds` (the server sends `: ping` heartbeats every 10s), treat the connection as dead: abort, then recover with §6.11.
 
 ### 6.3 Assistant message anatomy
 
@@ -227,6 +235,9 @@ After the `retrieval` event, show **"Found N sources"** chips immediately, befor
 │ Sources: [1] KYC MD 2016 · p.33   [2] KYC MD 2016 · p.34    │  ← compact source row
 │                                                             │
 │ 👍 👎  ⧉ Copy  ↻ Regenerate  ⋯ (Show verification details)    │  ← action bar
+│                                                             │
+│ ➜ What triggers an immediate KYC update?                    │  ← follow-up chips (last answer only)
+│ ➜ How are customer risk categories determined?              │
 └─────────────────────────────────────────────────────────────┘
 ```
 
@@ -239,14 +250,17 @@ After the `retrieval` event, show **"Found N sources"** chips immediately, befor
   - The method: "Rules + AI fact-check" or "Rules only".
   - If present, lists of unsupported claims (with reasons), figures not found in sources, and invalid citations.
   - If `revised`, a note: "The first draft contained unsupported statements and was corrected automatically."
-- **General mode banner** (`mode = "general"`): a violet info strip above the text, stating: "This answer is from general knowledge, not from the loaded regulatory documents. Verify on the regulator's website." No source row.
+- **General mode banner** (`mode = "general"`): a violet info strip above the text, stating: "This answer is from general knowledge, not from the loaded regulatory documents. Verify on the regulator's website." No source row. In `auto` mode this also appears when the documents looked relevant but didn't answer the question (`revision.reason = "general_fallback"`); add a "Documents only" quick action that regenerates with `answer_mode: "regulatory"`.
 - **Not-found state** (`mode = "not_found"`): a muted card with a `SearchX` icon and the backend text (markdown), plus three quick actions:
-  - "Search all regulators" (re-asks with `category=ALL`)
-  - "Ask in General knowledge mode" (re-asks with `answer_mode=general`)
+  - "Search all regulators": `POST /messages/{id}/regenerate {category:"ALL"}`
+  - "Ask in General knowledge mode": `POST /messages/{id}/regenerate {answer_mode:"general"}`
   - "Browse documents"
+
+  Its `followups` are starter questions the documents do cover. Render them as chips under the heading "Try one of these".
 - **Confidence meter:** 3 segments; high is all three, medium two, low one; `null` hides the meter.
 - **Copy:** copies the answer markdown plus a "Sources" list (`[n] doc name, circular id, section, page`).
-- **Regenerate:** re-sends the same question in the same conversation. The backend creates a new message pair; show the newest one.
+- **Regenerate** (§6.8): shown on the **last** assistant message. On older messages show it inside the `⋯` menu with the warning "Later messages will be removed".
+- **Message status:** `status = "stopped"` renders the partial text with a muted "Stopped" label and a **Retry** button. `status = "error"` renders the partial text (if any) plus an inline error row ("The answer couldn't be completed") with **Retry**. Both call regenerate. Hide feedback and follow-ups on these messages.
 
 ### 6.4 Sources panel
 
@@ -264,7 +278,10 @@ After the `retrieval` event, show **"Found N sources"** chips immediately, befor
 - Row actions on hover or via the `⋯` menu: Rename (inline edit), Pin/Unpin, Archive, Delete (with a confirm dialog).
 - The search box calls `GET /conversations?q=` (debounced 250ms); the backend searches titles and message text.
 - The list is paginated with `limit=30&offset=…` (infinite scroll).
-- A new conversation appears at the top as soon as the `conversation` SSE event arrives. Its title comes from the first question, so update the cache optimistically.
+- A new conversation appears at the top as soon as the `conversation` SSE event arrives. Its provisional title is the first question (truncated); update the cache optimistically.
+- When the `title` event arrives (after the first answer), replace the title in the sidebar and header with a short fade. The backend never overwrites a title the user renamed.
+- Row menu also offers **Export → Markdown / JSON** (§6.12).
+- Show a small pulsing dot on rows whose conversation is streaming (the active one, or `streaming: true` from the detail fetch).
 
 ### 6.6 Empty state (`/`)
 
@@ -279,6 +296,50 @@ After the `retrieval` event, show **"Found N sources"** chips immediately, befor
   - Reason checkboxes: Incorrect, Not supported by sources, Missing information, Wrong citation, Outdated, Unclear, Too long, Other.
   - An optional comment field and a Submit button.
 - Show the existing rating from `message.feedback` when a conversation loads.
+
+### 6.8 Regenerate and retry
+
+`POST /messages/{assistantMessageId}/regenerate` (SSE, optional body `RegenerateRequest`).
+
+1. Optimistically remove that assistant message **and every later message** from the cache. The backend deletes them too.
+2. Start a stream exactly like a new message, but keep the existing user bubble (the `conversation` event repeats its `user_message_id`).
+3. Body overrides are optional. With none, the conversation's saved regulator and mode are used. Overrides (e.g. from the not-found card) are saved on the conversation, so update the selectors.
+
+The same call is the **Retry** for `stopped` and `error` messages, and for a stream that dropped (§6.11).
+
+### 6.9 Edit a question
+
+The pencil icon on a user bubble (or `↑` in an empty composer for the last question) turns the bubble into an inline textarea with **Cancel** and **Save & send**.
+
+- `POST /messages/{userMessageId}/edit {question}` (SSE). The backend updates the question, deletes every later message, and streams a new answer.
+- If the edited message isn't the last question, confirm first: "Editing will remove N later messages."
+- Editing the first question also re-titles the conversation if the title is still automatic. Handle the `title` event as usual.
+
+### 6.10 Busy conversations (409)
+
+Only one answer per conversation can run at a time. You'll normally prevent this in the UI, but another tab or device can still hit it:
+
+- `409 conversation_busy` from send, regenerate or edit: show the toast "An answer is still being generated in this conversation", with **Stop it** (`POST /conversations/{id}/stop`) and **Wait** (§6.11 polling) actions. Keep the composer text.
+- Different conversations can stream in parallel. If you allow that, keep the stream state keyed by conversation id.
+
+### 6.11 Reload, navigation and dropped connections
+
+The server owns generation and persistence, so the client never has to "save" anything.
+
+- **Navigating away or closing the tab** aborts the fetch, so the server stops and saves the partial answer as `stopped`. To let answers finish in the background instead, don't abort on route change (keep the stream in a store outside the page component) and only abort on an explicit Stop.
+- **Opening a conversation** (`GET /conversations/{id}`) with `streaming: true` (e.g. after a reload, or from another tab): render the messages, show a "Generating answer…" placeholder after the last user message, and poll the conversation every 2s until `streaming` is false. Then render the saved answer. Offer **Stop** during polling.
+- **Dropped stream** (network error, or no event for `2 × sse_heartbeat_seconds`): treat it as stopped. Refetch the conversation; if the last assistant message is `stopped` or `error`, show **Retry** (regenerate).
+
+### 6.12 Export
+
+The `⋯` menu in the conversation header and sidebar row offers **Export as Markdown** and **Export as JSON**: `GET /conversations/{id}/export?format=markdown|json`, a file download. The BFF route must pass `Content-Type` and `Content-Disposition` through (§9.2). The Markdown includes each answer's mode, verification and full citations, and a "not legal advice" note.
+
+### 6.13 Follow-up suggestions
+
+- The `followups` event (or `message.followups` after reload) holds up to 3 short questions. Render them as outline chips under the **last** assistant message only.
+- Clicking a chip sends it as a new message in the same conversation, with the current selectors.
+- They arrive about a second after the answer finishes. Fade them in, and don't block the composer on them.
+- Turn them off per request with `followups: false` (e.g. a user setting); `/meta.features.followups` tells you whether the server generates them at all.
 
 ---
 
@@ -326,7 +387,7 @@ After the `retrieval` event, show **"Found N sources"** chips immediately, befor
 
 ### 7.5 Settings
 
-- Theme, default regulator, default answer mode, "Show verification details by default".
+- Theme, default regulator, default answer mode, "Show verification details by default", and "Suggest follow-up questions" (sent as `followups` on every request).
 - **Danger zone:** "Delete all conversations" calls `DELETE /conversations` and requires typing a confirmation.
 
 ---
@@ -346,6 +407,7 @@ export type AnswerMode = "auto" | "regulatory" | "general";
 export type ResponseMode = "regulatory" | "general" | "not_found";
 export type Confidence = "high" | "medium" | "low" | null;
 export type VerificationStatus = "verified" | "partially_verified" | "unverified" | "not_applicable";
+export type MessageStatus = "complete" | "stopped" | "error";
 
 export interface Source {
   id: number;                 // citation number used as [n]
@@ -387,7 +449,17 @@ export interface ChatRequest {
   history?: { question: string; answer: string }[]; // only for save=false
   verify?: boolean;                 // default true
   save?: boolean;                   // default true
+  followups?: boolean;              // default true: suggest next questions
 }
+
+// POST /messages/{assistantId}/regenerate: every field optional (defaults = conversation settings)
+export interface RegenerateRequest {
+  category?: Category; answer_mode?: AnswerMode; top_k?: number; verify?: boolean; followups?: boolean;
+}
+// POST /messages/{userId}/edit
+export interface EditRequest extends RegenerateRequest { question: string }
+
+export interface StopResponse { conversation_id: string; stopped: boolean }  // false = nothing was running
 
 export interface ChatResponse {
   conversation_id: string | null;
@@ -405,6 +477,8 @@ export interface ChatResponse {
   model: string | null;
   latency_ms: number;
   timings: Record<string, number>;
+  followups: string[];              // [] when disabled
+  title: string | null;             // set only if this exchange changed the conversation title
 }
 
 export interface Conversation {
@@ -414,13 +488,18 @@ export interface Conversation {
 }
 export interface Message {
   id: string; conversation_id: string; role: "user" | "assistant";
-  content: string; status: "complete" | "error";
+  content: string;                  // partial text when status is "stopped" or "error"
+  status: MessageStatus;            // user messages are always "complete"
   mode: ResponseMode | null; sources: Source[]; verification: Verification | null;
+  followups: string[];
   confidence: Confidence; revised: boolean; standalone_question: string | null;
   model: string | null; latency_ms: number | null; created_at: string;
   feedback: { rating: 1 | -1; reasons: string[]; comment: string | null } | null;
 }
-export interface ConversationDetail extends Conversation { messages: Message[] }
+export interface ConversationDetail extends Conversation {
+  messages: Message[];              // oldest first
+  streaming: boolean;               // an answer is being generated right now (§6.11)
+}
 export interface Paginated<T> { items: T[]; total: number; limit: number; offset: number }
 
 export interface ApiErrorBody {
@@ -429,7 +508,9 @@ export interface ApiErrorBody {
 }
 ```
 
-### 8.2 SSE event union (`POST /chat/stream`)
+### 8.2 SSE event union (`POST /chat/stream`, `/messages/{id}/regenerate`, `/messages/{id}/edit`)
+
+All three endpoints stream the same events. Errors that happen before streaming (`404`, `409 conversation_busy`, `422`, `429`) come back as normal JSON error responses, so check `res.ok` before reading the body.
 
 Each frame looks like this:
 
@@ -439,9 +520,11 @@ data: {"type":"<type>", ...}
 
 ```
 
-The `type` field is duplicated inside the JSON, so you can parse `data:` lines alone.
+The `type` field is duplicated inside the JSON, so you can parse `data:` lines alone. **Lines starting with `:` are heartbeats** (`: ping`, every `limits.sse_heartbeat_seconds`); skip them, but treat them as proof the connection is alive.
 
 ```ts
+export type RevisionReason = "format" | "repair" | "not_found" | "general_fallback";
+
 export type StreamEvent =
   | { type: "conversation"; conversation_id: string; user_message_id: string | null }
   | { type: "status"; stage: "understanding" | "searching" | "thinking" | "writing" | "verifying" | "revising"; message: string }
@@ -449,20 +532,60 @@ export type StreamEvent =
       standalone_question: string; sources: Source[]; timings: Record<string, number> }
   | { type: "token"; content: string }
   | ({ type: "verification"; final: boolean } & Verification)
-  | { type: "revision"; answer: string; mode: ResponseMode; sources?: Source[] }
-  | { type: "done"; message_id: string | null; conversation_id: string | null; mode: ResponseMode;
-      answer: string; confidence: Confidence; model: string | null; latency_ms: number }
-  | { type: "error"; code: "rate_limited" | "llm_error" | "internal_error"; message: string };
+  | { type: "revision"; answer: string; mode: ResponseMode; reason: RevisionReason; sources?: Source[] }
+  | { type: "followups"; followups: string[] }
+  | { type: "title"; conversation_id: string; title: string }
+  | { type: "error"; code: "rate_limited" | "llm_error" | "internal_error"; message: string }
+  | { type: "done"; status: MessageStatus; message_id: string | null; conversation_id: string | null;
+      mode: ResponseMode | null; answer: string; confidence: Confidence; model: string | null; latency_ms: number };
 ```
 
 Ordering guarantees:
 
-- `conversation` (only when saving) → `status(searching)` → `retrieval` → `status(thinking)` → `status(writing)` → `token`… → [`status(verifying)` → (`verification{final:false}` → `status(revising)` → `revision`)? → `verification{final:true}`] → `done`.
-- For `not_found`, the sequence is `retrieval` → a single `token` holding the full refusal text → `done`.
-- `revision.answer` **replaces** the streamed text entirely. Animate a crossfade and show "Refined after fact-check".
-- `done.answer` is the canonical final text; always overwrite the local buffer with it.
-- If `retrieval.mode` is `regulatory` and a later `revision.mode` is `not_found`, drop the sources and show the not-found card.
-- `error` can occur at any time and ends the stream. The partial assistant message is saved server-side with `status: "error"`.
+- `conversation` (saved chats only) → [`status(understanding)`] → `status(searching)` → `retrieval` → `status(thinking)` → `status(writing)` → `token`… → [`revision(format)`] → [`status(verifying)` → (`verification{final:false}` → `status(revising)` → `revision(repair)`)? → `verification{final:true}`] → [`followups`] → [`title`] → `done`.
+- **`done` is always the last frame**, including after a Stop (`status: "stopped"`) and after an `error` (`status: "error"`). It carries the saved `message_id`, so Retry works without a refetch. If the stream ends without `done`, the connection dropped (§6.11).
+- For `not_found` without an LLM call: `retrieval` → a single `token` holding the full refusal text → `followups` (starter questions) → `done`.
+- `revision.answer` **replaces** the text; later `token`s append to it. React to `reason`:
+  - `format`: swap silently.
+  - `repair`: crossfade and show "Refined after fact-check" (set `revised`).
+  - `not_found`: drop the sources and show the not-found card.
+  - `general_fallback`: `answer` is `""` and `sources` is `[]`. Clear the text, switch to the general banner, and keep appending the tokens that follow.
+- `done.answer` is the canonical saved text; always overwrite the local buffer with it.
+- `error` means no more content. Show the inline error row; `done{status:"error"}` follows.
+- `followups` and `title` arrive after the answer is final and are skipped when the answer was stopped or failed.
+
+### 8.2.1 Recorded example (real server, abridged)
+
+```
+event: conversation
+data: {"type":"conversation","conversation_id":"6f1c…","user_message_id":"a41c…"}
+
+event: status
+data: {"type":"status","stage":"searching","message":"Searching regulatory documents…"}
+
+event: retrieval
+data: {"type":"retrieval","mode":"regulatory","grounded":true,"gate_score":0.998,"sources":[…],…}
+
+event: status
+data: {"type":"status","stage":"writing","message":"Writing answer…"}
+
+event: token
+data: {"type":"token","content":"The RBI’s Master Direction requires"}
+
+: ping
+
+event: verification
+data: {"type":"verification","status":"verified","score":1.0,"final":true,…}
+
+event: followups
+data: {"type":"followups","followups":["What triggers an immediate KYC update?","…"]}
+
+event: title
+data: {"type":"title","conversation_id":"6f1c…","title":"Periodic KYC Update Timelines"}
+
+event: done
+data: {"type":"done","status":"complete","message_id":"5d0e…","conversation_id":"6f1c…","mode":"regulatory","answer":"…","confidence":"high","model":"openai/gpt-oss-120b","latency_ms":3860}
+```
 
 ### 8.3 Endpoint table
 
@@ -473,12 +596,17 @@ Ordering guarantees:
 | `GET /meta` | — | categories, answer_modes, limits, features, models | cache 1h |
 | `GET /suggestions` | `?category=&limit=` | `{category, suggestions: string[]}` | |
 | `POST /chat` | `ChatRequest` | `ChatResponse` | 429/503 possible |
-| `POST /chat/stream` | `ChatRequest` | SSE (`StreamEvent`) | 404 if conversation not yours |
+| `POST /chat/stream` | `ChatRequest` | SSE (`StreamEvent`) | 404 if conversation not yours, 409 busy |
+| `POST /messages/{id}/regenerate` | `RegenerateRequest?` | SSE | `id` = assistant message; removes it and later messages; Retry for stopped/error |
+| `POST /messages/{id}/edit` | `EditRequest` | SSE | `id` = user message; removes later messages |
+| `GET /messages/{id}` | — | `Message` | |
 | `GET /conversations` | `?limit=30&offset=0&q=&archived=false` | `Paginated<Conversation>` | pinned first, then `updated_at` desc |
 | `POST /conversations` | `{title?, category?, answer_mode?}` | `Conversation` (201) | |
-| `GET /conversations/{id}` | — | `ConversationDetail` | includes your feedback per message |
+| `GET /conversations/{id}` | — | `ConversationDetail` | includes your feedback per message and `streaming` |
 | `PATCH /conversations/{id}` | `{title?, pinned?, archived?, category?, answer_mode?}` | `Conversation` | |
-| `DELETE /conversations/{id}` | — | 204 | |
+| `POST /conversations/{id}/stop` | — | `StopResponse` | idempotent |
+| `GET /conversations/{id}/export` | `?format=markdown\|json` | file (attachment) | |
+| `DELETE /conversations/{id}` | — | 204 | stops a running answer first |
 | `DELETE /conversations` | — | `{deleted: number}` | all of the user's conversations |
 | `PUT /messages/{id}/feedback` | `{rating: 1 \| -1, reasons?, comment?}` | feedback | assistant messages only |
 | `DELETE /messages/{id}/feedback` | — | 204 | |
@@ -518,9 +646,10 @@ Every non-2xx response has the shape `{"error": {"code", "message", "request_id"
 
 | HTTP | `code` | UI behaviour |
 |---|---|---|
-| 400 | `invalid_user_id`, `invalid_page`, `bad_request` | toast with message (bug: log it) |
+| 400 | `invalid_user_id`, `invalid_page`, `bad_request`, `invalid_message` | toast with message (bug: log it) |
 | 401 | `unauthorized` | BFF misconfiguration: log; show "Service unavailable" |
 | 404 | `conversation_not_found`, `message_not_found`, `document_not_found` | redirect to `/` with a toast, or show a not-found page |
+| 409 | `conversation_busy` | toast with **Stop it** / **Wait** (§6.10); keep the composer text |
 | 409 | `document_exists`, `job_running` | inline form error / disable action |
 | 413 / 415 | `file_too_large` / `invalid_file` | inline upload error |
 | 422 | `validation_error` (`details: [{field, message}]`) | map to form fields |
@@ -579,29 +708,32 @@ export async function api<T>(path: string, init: RequestInit & { admin?: boolean
 
 ### 9.2 Streaming proxy route
 
+One helper serves all three streaming endpoints:
+
 ```ts
-// app/api/chat/stream/route.ts
+// lib/api/sse-proxy.ts  (server-only)
+import "server-only";
 import { backendHeaders } from "@/lib/api/server";
 
-export const runtime = "nodejs";          // keep long-lived streams off the edge runtime
-export const dynamic = "force-dynamic";
-
-export async function POST(req: Request) {
+export async function proxySSE(req: Request, path: string): Promise<Response> {
   const body = await req.text();
-  const upstream = await fetch(`${process.env.COMPLIANCEIQ_API_URL}/api/v1/chat/stream`, {
+  const upstream = await fetch(`${process.env.COMPLIANCEIQ_API_URL}/api/v1${path}`, {
     method: "POST",
     headers: { ...(await backendHeaders()), "Content-Type": "application/json", Accept: "text/event-stream" },
-    body,
-    signal: req.signal,                    // client abort → upstream abort
+    body: body || "{}",
+    signal: req.signal,                    // browser abort → upstream abort → backend stops and saves "stopped"
   });
   if (!upstream.ok || !upstream.body) {
-    return new Response(await upstream.text(), { status: upstream.status,
-      headers: { "Content-Type": "application/json" } });
+    // 404 / 409 conversation_busy / 422 / 429: pass the JSON error and Retry-After through unchanged
+    const headers = new Headers({ "Content-Type": "application/json" });
+    const retryAfter = upstream.headers.get("retry-after");
+    if (retryAfter) headers.set("Retry-After", retryAfter);
+    return new Response(await upstream.text(), { status: upstream.status, headers });
   }
   return new Response(upstream.body, {
     headers: {
       "Content-Type": "text/event-stream",
-      "Cache-Control": "no-cache, no-transform",
+      "Cache-Control": "no-cache, no-transform",   // no-transform: stop compression middleware from buffering
       "X-Accel-Buffering": "no",
       Connection: "keep-alive",
     },
@@ -609,35 +741,88 @@ export async function POST(req: Request) {
 }
 ```
 
+```ts
+// app/api/chat/stream/route.ts
+import { proxySSE } from "@/lib/api/sse-proxy";
+export const runtime = "nodejs";          // keep long-lived streams off the edge runtime
+export const dynamic = "force-dynamic";
+export const maxDuration = 120;           // serverless hosts: allow long answers
+export const POST = (req: Request) => proxySSE(req, "/chat/stream");
+
+// app/api/messages/[id]/regenerate/route.ts  (same exports, runtime, dynamic, maxDuration)
+export const POST = async (req: Request, { params }: { params: Promise<{ id: string }> }) =>
+  proxySSE(req, `/messages/${encodeURIComponent((await params).id)}/regenerate`);
+
+// app/api/messages/[id]/edit/route.ts
+export const POST = async (req: Request, { params }: { params: Promise<{ id: string }> }) =>
+  proxySSE(req, `/messages/${encodeURIComponent((await params).id)}/edit`);
+```
+
+Stop and export are plain proxies. Export must forward the download headers:
+
+```ts
+// app/api/conversations/[id]/stop/route.ts
+import { api } from "@/lib/api/server";
+export const POST = async (_: Request, { params }: { params: Promise<{ id: string }> }) =>
+  Response.json(await api(`/conversations/${encodeURIComponent((await params).id)}/stop`, { method: "POST" }));
+
+// app/api/conversations/[id]/export/route.ts
+import { backendHeaders } from "@/lib/api/server";
+export async function GET(req: Request, { params }: { params: Promise<{ id: string }> }) {
+  const format = new URL(req.url).searchParams.get("format") === "json" ? "json" : "markdown";
+  const res = await fetch(`${process.env.COMPLIANCEIQ_API_URL}/api/v1/conversations/${
+    encodeURIComponent((await params).id)}/export?format=${format}`, { headers: await backendHeaders() });
+  return new Response(res.body, { status: res.status, headers: {
+    "Content-Type": res.headers.get("content-type") ?? "application/octet-stream",
+    "Content-Disposition": res.headers.get("content-disposition") ?? "attachment",
+  } });
+}
+```
+
+Hosting notes: SSE needs a Node runtime with streaming responses (Vercel functions, a Node server, Docker). Disable response buffering or compression for `/api/chat/*` and `/api/messages/*` in any proxy in front (nginx: `proxy_buffering off`). Set the platform's function timeout above your longest answer (about 60s is plenty; heartbeats keep idle-timeout proxies from cutting the connection).
+
 ### 9.3 Browser SSE client (POST + fetch; `EventSource` can't POST)
 
 ```ts
 // lib/chat/stream.ts
-import type { ChatRequest, StreamEvent } from "@/lib/api/types";
+import type { StreamEvent } from "@/lib/api/types";
 
-export async function* streamChat(req: ChatRequest, signal: AbortSignal): AsyncGenerator<StreamEvent> {
-  const res = await fetch("/api/chat/stream", {
+export class StreamHttpError extends Error {
+  constructor(public status: number, public code: string | undefined, message: string, public retryAfter?: number) {
+    super(message);
+  }
+}
+
+/**
+ * POSTs to a BFF streaming route and yields parsed events.
+ * `onActivity` fires for every frame, heartbeats included (feed a stall watchdog).
+ */
+export async function* streamSSE(
+  url: string, body: unknown, signal: AbortSignal, onActivity?: () => void,
+): AsyncGenerator<StreamEvent> {
+  const res = await fetch(url, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(req),
+    body: JSON.stringify(body ?? {}),
     signal,
   });
   if (!res.ok || !res.body) {
     const err = await res.json().catch(() => null);
-    throw Object.assign(new Error(err?.error?.message ?? "Request failed"), {
-      status: res.status, code: err?.error?.code, retryAfter: Number(res.headers.get("retry-after")) || undefined,
-    });
+    throw new StreamHttpError(res.status, err?.error?.code, err?.error?.message ?? "Request failed",
+      Number(res.headers.get("retry-after")) || undefined);
   }
   const reader = res.body.pipeThrough(new TextDecoderStream()).getReader();
   let buffer = "";
   while (true) {
     const { value, done } = await reader.read();
     if (done) break;
-    buffer += value;
+    buffer += value.replace(/\r\n/g, "\n");
     let sep: number;
     while ((sep = buffer.indexOf("\n\n")) !== -1) {
       const frame = buffer.slice(0, sep);
       buffer = buffer.slice(sep + 2);
+      onActivity?.();
+      // ": ping" heartbeat frames have no data: lines and are skipped here
       const data = frame.split("\n").filter(l => l.startsWith("data:")).map(l => l.slice(5).trimStart()).join("\n");
       if (!data || data === "[DONE]") continue;
       yield JSON.parse(data) as StreamEvent;
@@ -649,25 +834,41 @@ export async function* streamChat(req: ChatRequest, signal: AbortSignal): AsyncG
 ### 9.4 Stream state (Zustand) and reducer
 
 ```ts
-// lib/chat/store.ts
-type Stage = "idle" | "understanding" | "searching" | "thinking" | "writing" | "verifying" | "revising" | "done" | "error" | "stopped";
+// lib/chat/reducer.ts
+type Stage = "idle" | "understanding" | "searching" | "thinking" | "writing" | "verifying" | "revising"
+  | "complete" | "stopped" | "error";
 
-interface ActiveAnswer {
+export interface ActiveAnswer {
   stage: Stage; statusText: string; text: string; sources: Source[];
-  mode: ResponseMode | null; verification: Verification | null; revised: boolean;
-  confidence: Confidence; messageId: string | null; error?: { code: string; message: string };
+  mode: ResponseMode | null; verification: Verification | null; revised: boolean; generalFallback: boolean;
+  confidence: Confidence; messageId: string | null; userMessageId: string | null;
+  followups: string[]; error?: { code: string; message: string };
 }
+
+export const initialAnswer: ActiveAnswer = {
+  stage: "idle", statusText: "", text: "", sources: [], mode: null, verification: null, revised: false,
+  generalFallback: false, confidence: null, messageId: null, userMessageId: null, followups: [],
+};
 
 export function reduce(s: ActiveAnswer, e: StreamEvent): ActiveAnswer {
   switch (e.type) {
+    case "conversation": return { ...s, userMessageId: e.user_message_id };
     case "status": return { ...s, stage: e.stage, statusText: e.message };
     case "retrieval": return { ...s, sources: e.sources, mode: e.mode };
     case "token": return { ...s, text: s.text + e.content };
-    case "revision": return { ...s, text: e.answer, mode: e.mode, revised: true, sources: e.sources ?? s.sources };
+    case "revision": return {
+      ...s, text: e.answer, mode: e.mode, sources: e.sources ?? s.sources,
+      revised: s.revised || e.reason === "repair",
+      generalFallback: s.generalFallback || e.reason === "general_fallback",
+    };
     case "verification": return e.final ? { ...s, verification: e } : s;
-    case "done": return { ...s, stage: "done", text: e.answer, mode: e.mode, confidence: e.confidence, messageId: e.message_id };
-    case "error": return { ...s, stage: "error", error: { code: e.code, message: e.message } };
-    default: return s;
+    case "followups": return { ...s, followups: e.followups };
+    case "error": return { ...s, error: { code: e.code, message: e.message } };
+    case "done": return {
+      ...s, stage: e.status, text: e.answer, mode: e.mode ?? s.mode, confidence: e.confidence,
+      messageId: e.message_id, followups: e.status === "complete" ? s.followups : [],
+    };
+    default: return s;   // "title" is handled by the controller (cache update)
   }
 }
 ```
@@ -676,7 +877,9 @@ Batch token updates: append to a ref and flush to state once per `requestAnimati
 
 On `conversation`: if the URL is `/`, call `router.replace('/c/' + id)` **without** remounting the chat, using `window.history.replaceState` or a layout that keeps the chat client mounted. Prepend the conversation to the sidebar cache.
 
-On `done`: invalidate `["conversation", id]` and `["conversations"]` queries.
+On `title`: patch the title in the `["conversations"]` and `["conversation", id]` caches.
+
+On `done`: invalidate `["conversation", id]` and `["conversations"]` so the saved messages replace the local ones.
 
 ### 9.5 Rendering citations in markdown
 
@@ -725,6 +928,114 @@ export function AnswerMarkdown({ text, sources, onCite }: { text: string; source
 
 During streaming, a citation may arrive split across tokens (for example `[` and then `1]`). The regex only matches complete brackets, so partial text renders as plain characters until it completes.
 
+### 9.6 Chat controller: send, stop, regenerate, edit
+
+One hook owns the stream lifecycle. Every action is "start a stream at some URL", so they share one runner.
+
+```ts
+// lib/chat/use-chat-stream.ts
+"use client";
+import { useCallback, useRef, useState } from "react";
+import { useQueryClient } from "@tanstack/react-query";
+import { toast } from "sonner";
+import { streamSSE, StreamHttpError } from "@/lib/chat/stream";
+import { reduce, initialAnswer, type ActiveAnswer } from "@/lib/chat/reducer";
+import type { ChatRequest, RegenerateRequest, StreamEvent } from "@/lib/api/types";
+
+const STALL_MS = 25_000;   // > 2 × sse_heartbeat_seconds
+
+export function useChatStream(opts: { onConversation?: (id: string) => void } = {}) {
+  const qc = useQueryClient();
+  const [answer, setAnswer] = useState<ActiveAnswer>(initialAnswer);
+  const ctrl = useRef<AbortController | null>(null);
+  const conversationId = useRef<string | null>(null);
+  const streaming = answer.stage !== "idle" && !["complete", "stopped", "error"].includes(answer.stage);
+
+  const run = useCallback(async (url: string, body: unknown, convId: string | null) => {
+    ctrl.current?.abort();
+    const c = new AbortController();
+    ctrl.current = c;
+    conversationId.current = convId;
+    setAnswer({ ...initialAnswer, stage: "searching", statusText: "Searching regulatory documents…" });
+
+    let stall: ReturnType<typeof setTimeout> | undefined;
+    const alive = () => { clearTimeout(stall); stall = setTimeout(() => c.abort("stalled"), STALL_MS); };
+    let finished = false;
+    try {
+      alive();
+      for await (const e of streamSSE(url, body, c.signal, alive)) {
+        handleSideEffects(e);
+        setAnswer(s => reduce(s, e));            // batch tokens with rAF in production
+        if (e.type === "done") finished = true;
+      }
+      if (!finished) throw new Error("stream ended early");
+    } catch (err) {
+      if (err instanceof StreamHttpError) {
+        setAnswer(initialAnswer);
+        if (err.code === "conversation_busy") {
+          toast("An answer is still being generated in this conversation.", {
+            action: { label: "Stop it", onClick: () => stop() },
+          });
+        } else if (err.status === 429) {
+          toast(`You're asking quickly — try again in ${err.retryAfter ?? 30}s`);
+        } else {
+          toast.error(err.message);
+        }
+        throw err;                                // caller restores the composer text
+      }
+      // aborted by the user (stop), stalled, or the network dropped: the server saved what it had
+      setAnswer(s => (finished ? s : { ...s, stage: "stopped" }));
+    } finally {
+      clearTimeout(stall);
+      if (ctrl.current === c) ctrl.current = null;
+      if (conversationId.current) {
+        qc.invalidateQueries({ queryKey: ["conversation", conversationId.current] });
+        qc.invalidateQueries({ queryKey: ["conversations"] });
+      }
+    }
+
+    function handleSideEffects(e: StreamEvent) {
+      if (e.type === "conversation") {
+        conversationId.current = e.conversation_id;
+        opts.onConversation?.(e.conversation_id);
+      } else if (e.type === "title") {
+        qc.setQueryData(["conversation", e.conversation_id], (old: any) => old && { ...old, title: e.title });
+        qc.invalidateQueries({ queryKey: ["conversations"] });
+      }
+    }
+  }, [qc, opts]);
+
+  const send = (req: ChatRequest) => run("/api/chat/stream", req, req.conversation_id ?? null);
+  const regenerate = (assistantMessageId: string, convId: string, body: RegenerateRequest = {}) =>
+    run(`/api/messages/${assistantMessageId}/regenerate`, body, convId);
+  const edit = (userMessageId: string, convId: string, question: string, body: RegenerateRequest = {}) =>
+    run(`/api/messages/${userMessageId}/edit`, { ...body, question }, convId);
+
+  const stop = useCallback(async () => {
+    const id = conversationId.current;
+    ctrl.current?.abort("user");                 // ends the local stream immediately
+    if (id) await fetch(`/api/conversations/${id}/stop`, { method: "POST" }).catch(() => {});
+  }, []);
+
+  return { answer, streaming, send, regenerate, edit, stop };
+}
+```
+
+Why Stop does both: aborting the fetch makes the UI responsive at once, and the backend also notices the disconnect. The explicit `POST /stop` covers the cases where the abort can't reach the backend: a buffering proxy, a stream started in another tab, or a page reload (§6.11).
+
+**Optimistic cache edits** before calling `regenerate`/`edit`: in `["conversation", id]`, drop the target assistant message (regenerate) or every message after the edited user message (edit), and replace the edited question's text. The `done` invalidation then reconciles with the server.
+
+**Reload recovery** (§6.11):
+
+```ts
+// in the conversation page
+const { data } = useQuery({
+  queryKey: ["conversation", id],
+  queryFn: () => getConversation(id),
+  refetchInterval: q => (q.state.data?.streaming && !activeStream ? 2000 : false),
+});
+```
+
 ---
 
 ## 10. Component inventory
@@ -736,8 +1047,12 @@ During streaming, a citation may arrive split across tokens (for example `[` and
 | `ConversationRow` | title, inline rename, menu | `conversation` |
 | `ChatView` | message list + composer, owns stream lifecycle | `conversationId?` |
 | `MessageList` | virtualized list (react-virtuoso) and auto-scroll unless the user scrolled up | `messages, active` |
-| `UserMessage` | bubble, edit-and-resend | `message` |
-| `AssistantMessage` | badges, banner, markdown, source row, actions | `message \| active` |
+| `UserMessage` | bubble, inline edit-and-resend (§6.9) | `message, onEdit` |
+| `AssistantMessage` | badges, banner, markdown, source row, actions, stopped/error states | `message \| active` |
+| `MessageStatusRow` | "Stopped" / "Couldn't complete" + Retry | `status, onRetry` |
+| `FollowupChips` | suggested next questions under the last answer | `followups, onPick` |
+| `PendingAnswer` | "Generating answer…" while `streaming` without a local stream (§6.11) | `onStop` |
+| `ExportMenu` | Markdown / JSON download | `conversationId` |
 | `StatusLine` | stage icon + label | `stage, text` |
 | `AnswerMarkdown` | markdown + `CitationChip`s | `text, sources, onCite` |
 | `CitationChip` | `[n]` chip + HoverCard preview | `n, source?` |
@@ -762,7 +1077,8 @@ During streaming, a citation may arrive split across tokens (for example `[` and
 | `["meta"]` | `GET /api/meta` | 1h |
 | `["suggestions", category]` | `GET /api/suggestions?category=` | 1h |
 | `["conversations", {q, archived}]` | `GET /api/conversations` (infinite) | 30s |
-| `["conversation", id]` | `GET /api/conversations/:id` | 0 (refetch on focus off) |
+| `["conversation", id]` | `GET /api/conversations/:id` | 0 (refetch on focus off; poll 2s while `streaming`) |
+| `["message", id]` | `GET /api/messages/:id` | 0 (deep links `#m-<id>`) |
 | `["documents", category]` | `GET /api/documents` | 5m |
 | `["document", docId]`, `["outline", docId]`, `["page", docId, n]` | … | 10m |
 | `["admin", "stats", days]`, `["admin", "jobs"]` | … | 15s / poll |
@@ -773,7 +1089,8 @@ Mutations use optimistic updates for rename, pin, archive, delete, and feedback,
 
 ## 12. Accessibility
 
-- The streaming answer container has `aria-live="polite"` and `aria-busy` while streaming. Announce the stage changes, not every token.
+- The streaming answer container has `aria-live="polite"` and `aria-busy` while streaming. Announce the stage changes, not every token, and announce "Answer stopped" or "Answer failed" at the end.
+- Follow-up chips are a `role="list"` of buttons; the edit textarea traps `Esc` to cancel the edit, not stop a stream.
 - Citation chips are `<button>`s with `aria-label="Source 1: RBI Master Direction on KYC, page 33"`.
 - Every control is keyboard reachable, focus rings are visible, and `Esc` closes popovers and stops streaming.
 - Color is never the only signal: badges always include an icon and text.
@@ -804,8 +1121,8 @@ Mutations use optimistic updates for rename, pin, archive, delete, and feedback,
 ## 14. Testing
 
 - **Unit (Vitest):**
-  - The SSE parser: split frames, `[DONE]`, multi-line data.
-  - The stream reducer.
+  - The SSE parser: split frames, `[DONE]`, multi-line data, `: ping` heartbeat frames, `\r\n` line endings.
+  - The stream reducer: each `revision.reason`, `general_fallback` followed by tokens, `done` with each `status`, `error` → `done{status:"error"}`.
   - The citation parser, including ranges `[1-3]`, groups `[1, 2]`, and page suffix `[2, p.34]`.
 - **Component (RTL):**
   - `AssistantMessage` in each mode, verification states, and the revision crossfade.
@@ -815,10 +1132,15 @@ Mutations use optimistic updates for rename, pin, archive, delete, and feedback,
   2. Revised (`verification{final:false}` → `revision`).
   3. Not found.
   4. General.
-  5. A rate-limit error mid-stream.
-  6. A user pressing Stop.
+  5. Auto mode falling back to general (`revision{reason:"general_fallback"}`).
+  6. A rate-limit error mid-stream (`error` → `done{status:"error"}` → Retry).
+  7. A user pressing Stop (`done{status:"stopped"}`), then Retry.
+  8. `409 conversation_busy` on send.
+  9. Regenerate and edit removing later messages.
+  10. Reload during streaming (`streaming: true` → polling → answer appears).
+  11. Follow-up chips and the `title` event updating the sidebar.
 
-  Also cover an upload with job polling.
+  Also cover an upload with job polling and an export download.
 
 Recorded fixtures: capture real streams with
 `curl -N -X POST $API/api/v1/chat/stream -H "X-API-Key: …" -H "Content-Type: application/json" -d '{"question":"…"}' > fixtures/grounded.sse`.
@@ -841,7 +1163,12 @@ web/
 │   └── api/                         # BFF route handlers
 │       ├── chat/route.ts            # POST → /chat
 │       ├── chat/stream/route.ts     # POST → /chat/stream (pipe)
+│       ├── conversations/[id]/stop/route.ts
+│       ├── conversations/[id]/export/route.ts   # forwards Content-Disposition
 │       ├── conversations/[[...path]]/route.ts
+│       ├── messages/[id]/route.ts               # GET message
+│       ├── messages/[id]/regenerate/route.ts    # SSE pipe
+│       ├── messages/[id]/edit/route.ts          # SSE pipe
 │       ├── messages/[id]/feedback/route.ts
 │       ├── search/route.ts
 │       ├── documents/[[...path]]/route.ts   # includes /file passthrough
@@ -858,10 +1185,10 @@ web/
 ## 16. Build milestones
 
 1. **Foundation:** Next.js + Tailwind + shadcn, auth, the BFF client, `/meta`, theming, and the AppShell.
-2. **Chat MVP:** streaming chat with stages, markdown, citation chips, sources panel, and conversation create/load.
-3. **Trust UI:** mode banners, verification badge and popover, confidence meter, the not-found card, and revision handling.
-4. **History:** the sidebar with groups, search, rename/pin/archive/delete, and infinite scroll.
-5. **Feedback + copy/regenerate.**
+2. **Chat MVP:** streaming chat with stages, markdown, citation chips, sources panel, conversation create/load, Stop, and the stall watchdog.
+3. **Trust UI:** mode banners, verification badge and popover, confidence meter, the not-found card, and revision handling (all four reasons).
+4. **History:** the sidebar with groups, search, rename/pin/archive/delete, infinite scroll, and live titles.
+5. **Chat actions:** feedback, copy, regenerate/retry, edit question, follow-up chips, busy handling, reload recovery, and export.
 6. **Library + document reader:** outline, passages with highlight, and the PDF tab.
 7. **Search page.**
 8. **Admin:** stats, upload with job polling, metadata edit, reindex, and delete.

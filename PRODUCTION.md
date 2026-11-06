@@ -52,7 +52,10 @@ token budget, so keep the answer model and the fast model different.
 1. Push the repo; create a Web Service from `render.yaml` (Blueprint) or the `Dockerfile`.
 2. Set secrets: `GROQ_API_KEY`, `QDRANT_URL`, `QDRANT_API_KEY`, `API_KEYS`, `ADMIN_API_KEY`, `CORS_ORIGINS`.
 3. `render.yaml` mounts a 1 GB disk at `/var/data` for SQLite. Use Postgres instead if you
-   run more than one instance.
+   run more than one instance. Note that "one answer per conversation", stop, and the
+   `streaming` flag are tracked in process memory: with several instances, pin each
+   user to one instance (sticky sessions), or stop won't reach the instance generating
+   the answer.
 4. Health check: `/api/v1/health` (liveness). `/api/v1/ready` checks Qdrant, database,
    models and the LLM key — use it for alerts, not restarts.
 
@@ -121,3 +124,6 @@ For multiple instances, put a shared limiter (Redis, API gateway) in front.
 | Answers marked "partially verified" often | Check `verification.unsupported_claims` in `query_logs`; usually missing context → raise `MAX_RETRIEVAL_CHUNKS` or fix the source PDF. |
 | `_cffi_backend` / broken native wheels | Recreate the venv with Python 3.13. |
 | Slow first request | Models are still warming; wait for "API ready" in the logs. |
+| Streams arrive all at once / cut off after ~60 s | A proxy is buffering or timing out. Disable buffering (`X-Accel-Buffering: no` is sent; nginx `proxy_buffering off`), don't compress `text/event-stream`, raise idle timeouts above `SSE_HEARTBEAT_SECONDS`. |
+| `409 conversation_busy` that never clears | An answer is still running (check `streaming` on the conversation). `POST /conversations/{id}/stop`; a restart also clears it. |
+| Messages with status `stopped` | The client disconnected or pressed Stop; the partial answer was saved. Retry with `regenerate`. |

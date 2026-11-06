@@ -4,7 +4,8 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
 
-from sqlalchemy import create_engine, event
+from loguru import logger
+from sqlalchemy import create_engine, event, inspect, text
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session, sessionmaker
 
@@ -47,7 +48,28 @@ def get_engine() -> Engine:
 def init_db() -> None:
     from db.models import Base
 
-    Base.metadata.create_all(get_engine())
+    engine = get_engine()
+    Base.metadata.create_all(engine)
+    _add_missing_columns(engine, Base)
+
+
+def _add_missing_columns(engine: Engine, base) -> None:
+    """create_all never alters existing tables; add new nullable columns in place.
+
+    Covers additive schema changes only. Use Alembic for renames or type changes.
+    """
+    inspector = inspect(engine)
+    with engine.begin() as conn:
+        for table in base.metadata.sorted_tables:
+            if not inspector.has_table(table.name):
+                continue
+            existing = {c["name"] for c in inspector.get_columns(table.name)}
+            for column in table.columns:
+                if column.name in existing or not column.nullable:
+                    continue
+                col_type = column.type.compile(dialect=engine.dialect)
+                conn.execute(text(f'ALTER TABLE {table.name} ADD COLUMN "{column.name}" {col_type}'))
+                logger.info(f"Added column {table.name}.{column.name}")
 
 
 @contextmanager

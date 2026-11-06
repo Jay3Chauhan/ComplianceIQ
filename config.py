@@ -65,6 +65,12 @@ class Settings(BaseSettings):
     enable_answer_repair: bool = True
     verification_pass_score: float = 0.8
 
+    # ── Chat experience ──────────────────────────────────────────────────────
+    enable_followups: bool = True  # suggested next questions (fast model, ~400 tokens)
+    enable_llm_titles: bool = True  # short AI title for new conversations (same call)
+    # SSE comment ping interval; also how quickly a disconnected client is noticed
+    sse_heartbeat_seconds: float = 10.0
+
     # ── Persistence ──────────────────────────────────────────────────────────
     database_url: str = "sqlite:///./data/complianceiq.db"
 

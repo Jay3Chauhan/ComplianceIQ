@@ -7,6 +7,7 @@ from pydantic import BaseModel, Field, field_validator
 Category = Literal["ALL", "RBI", "SEBI", "AA"]
 AnswerMode = Literal["auto", "regulatory", "general"]
 ResponseMode = Literal["regulatory", "general", "not_found"]
+MessageStatus = Literal["complete", "error", "stopped"]
 Confidence = Literal["high", "medium", "low"]
 VerificationStatus = Literal["verified", "partially_verified", "unverified", "not_applicable"]
 FeedbackReason = Literal[
@@ -36,14 +37,38 @@ class ChatRequest(BaseModel):
     )
     verify: bool | None = Field(None, description="Override answer verification (default on)")
     save: bool = Field(True, description="Persist the exchange in a conversation")
+    followups: bool = Field(True, description="Suggest next questions after the answer")
 
     @field_validator("question")
     @classmethod
     def _strip(cls, v: str) -> str:
-        v = v.strip()
-        if len(v) < 3:
-            raise ValueError("question is too short")
-        return v
+        return _clean_question(v)
+
+
+def _clean_question(v: str) -> str:
+    v = v.strip()
+    if len(v) < 3:
+        raise ValueError("question is too short")
+    return v
+
+
+class RegenerateRequest(BaseModel):
+    """Answer the same question again. Omitted fields reuse the conversation's settings."""
+    category: Category | None = None
+    answer_mode: AnswerMode | None = None
+    top_k: int | None = Field(None, ge=1, le=10)
+    verify: bool | None = None
+    followups: bool = True
+
+
+class EditRequest(RegenerateRequest):
+    """Replace a question and answer it; every later message in the conversation is removed."""
+    question: str = Field(..., min_length=3, max_length=2000)
+
+    @field_validator("question")
+    @classmethod
+    def _strip(cls, v: str) -> str:
+        return _clean_question(v)
 
 
 class Source(BaseModel):
@@ -98,6 +123,8 @@ class ChatResponse(BaseModel):
     model: str | None
     latency_ms: int
     timings: dict
+    followups: list[str] = []
+    title: str | None = Field(None, description="Conversation title after this exchange")
 
 
 # ── Conversations ────────────────────────────────────────────────────────────
@@ -139,8 +166,9 @@ class Message(BaseModel):
     conversation_id: str
     role: Literal["user", "assistant"]
     content: str
-    status: str
+    status: MessageStatus
     mode: str | None = None
+    followups: list[str] = []
     sources: list[Source] = []
     verification: Verification | None = None
     confidence: str | None = None
@@ -154,6 +182,12 @@ class Message(BaseModel):
 
 class ConversationDetail(Conversation):
     messages: list[Message]
+    streaming: bool = Field(False, description="An answer is being generated right now")
+
+
+class StopResponse(BaseModel):
+    conversation_id: str
+    stopped: bool = Field(..., description="False when nothing was running")
 
 
 class ConversationList(BaseModel):
