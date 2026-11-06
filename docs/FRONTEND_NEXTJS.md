@@ -4,6 +4,12 @@ This document is the build spec for the production web frontend. It covers archi
 
 Backend reference: [`docs/API.md`](API.md). RAG internals: [`docs/RAG_ARCHITECTURE.md`](RAG_ARCHITECTURE.md).
 
+> **Implementation:** this spec is built in [`web/`](../web/README.md) (Next.js 16, React 19). Differences from the spec:
+> - One catch-all BFF route (`web/app/api/[...path]/route.ts`) with a path allowlist instead of one handler per endpoint. Admin routes are not exposed.
+> - No sign-in yet. `web/proxy.ts` issues an anonymous httpOnly `ciq_uid` cookie that becomes `X-User-Id`. Swap in a session user id in `web/lib/server/identity.ts` when auth is added.
+> - Responses are typed (`web/lib/api/types.ts`) but not Zod-validated.
+> - Next.js 16 with `cacheComponents`: dynamic route data is read inside `<Suspense>`, and visited routes stay mounted (React `<Activity>`), so per-page state is reset explicitly where it must not persist.
+
 ---
 
 ## 1. Product summary

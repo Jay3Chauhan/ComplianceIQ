@@ -16,7 +16,9 @@ sources before it reaches the user.
 - **Conversations, feedback, search, document browser, admin uploads** via a versioned REST + SSE API.
 - **Reliable chat** — answers are saved server-side even if the browser disconnects; stop,
   regenerate/retry, edit-and-resend, follow-up suggestions, AI titles and Markdown/JSON export.
-- **Streamlit UI** today; a Next.js frontend is specified in [docs/FRONTEND_NEXTJS.md](docs/FRONTEND_NEXTJS.md).
+- **Next.js web app** in [`web/`](web/README.md) — streaming chat with citations, a sources
+  panel, verification badges, history, document library and passage search. A Streamlit UI
+  (`frontend/`) is kept for quick local use.
 
 | Metric (eval set) | v1 | v2 |
 |---|---|---|
@@ -44,7 +46,7 @@ question → rewrite (follow-ups) → glossary → hybrid RRF → MiniLM rerank 
 | Vector DB | Qdrant Cloud, collection `regulations_v2` |
 | API | FastAPI, SSE streaming |
 | Persistence | SQLAlchemy — SQLite by default, Postgres via `DATABASE_URL` |
-| UI | Streamlit (current), Next.js (planned) |
+| UI | Next.js 16 + Tailwind + shadcn/ui (`web/`); Streamlit (`frontend/`) |
 
 ## Repo layout
 
@@ -55,6 +57,7 @@ ingestion/      PDF parsing, cleaning, sections, chunking, embedding, registry, 
 retrieval/      hybrid search, reranker, glossary, catalog, cache
 llm/            Groq client, prompts, query rewriter, verifier
 rag/            end-to-end pipeline (answer + stream)
+web/            Next.js frontend (BFF proxy, chat, library, search)
 frontend/       Streamlit app
 evaluation/     retrieval + generation eval harness and test set
 scripts/        smoke test, model check, debugging helpers
@@ -79,7 +82,12 @@ python -m ingestion.run_ingestion            # add --recreate to rebuild the col
 
 uvicorn api.main:app --reload --port 8000    # http://localhost:8000/docs
 
-# second terminal
+# second terminal: the web app (http://localhost:3000)
+cd web; npm install
+copy .env.example .env.local   # COMPLIANCEIQ_API_URL, COMPLIANCEIQ_API_KEY=<one of API_KEYS>
+npm run dev
+
+# or the Streamlit UI
 $env:COMPLIANCEIQ_API_KEY="<one of API_KEYS>"
 streamlit run frontend/app.py
 ```
