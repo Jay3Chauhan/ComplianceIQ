@@ -17,11 +17,13 @@ interface UIState {
   sidebarCollapsed: boolean;
   mobileNavOpen: boolean;
   settingsOpen: boolean;
+  shortcutsOpen: boolean;
   sourcesOpen: boolean;
   selection: SourcesSelection | null;
   setSidebarCollapsed: (v: boolean) => void;
   setMobileNavOpen: (v: boolean) => void;
   setSettingsOpen: (v: boolean) => void;
+  setShortcutsOpen: (v: boolean) => void;
   setSourcesOpen: (v: boolean) => void;
   showSources: (owner: string, sources: Source[], highlight?: number | null) => void;
   /** Keeps the panel in sync with the latest answer without opening it. */
@@ -34,11 +36,13 @@ export const useUI = create<UIState>()(
       sidebarCollapsed: false,
       mobileNavOpen: false,
       settingsOpen: false,
+      shortcutsOpen: false,
       sourcesOpen: false,
       selection: null,
       setSidebarCollapsed: (sidebarCollapsed) => set({ sidebarCollapsed }),
       setMobileNavOpen: (mobileNavOpen) => set({ mobileNavOpen }),
       setSettingsOpen: (settingsOpen) => set({ settingsOpen }),
+      setShortcutsOpen: (shortcutsOpen) => set({ shortcutsOpen }),
       setSourcesOpen: (sourcesOpen) => set({ sourcesOpen }),
       showSources: (owner, sources, highlight = null) =>
         set((s) => ({

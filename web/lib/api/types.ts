@@ -211,6 +211,74 @@ export interface SearchResponse {
   timings: Record<string, number>;
 }
 
+// ── Health ───────────────────────────────────────────────────────────────────
+
+export interface ReadinessCheck {
+  ok: boolean;
+  detail?: string | null;
+  latency_ms?: number | null;
+}
+
+export interface Readiness {
+  status: "ready" | "degraded";
+  checks: Record<string, ReadinessCheck>;
+}
+
+// ── Admin ────────────────────────────────────────────────────────────────────
+
+export type DocumentCategory = "RBI" | "SEBI" | "AA" | "GENERAL";
+
+export interface AdminSession {
+  enabled: boolean;
+  authenticated: boolean;
+}
+
+export interface IngestJob {
+  id: string;
+  doc_id: string;
+  filename: string;
+  status: "queued" | "running" | "succeeded" | "failed";
+  stage: string | null;
+  progress: number;
+  result: Record<string, unknown> | null;
+  error: string | null;
+  created_at: string;
+  started_at: string | null;
+  finished_at: string | null;
+}
+
+export interface DocumentMetadata {
+  name: string;
+  circular_id: string;
+  category: DocumentCategory;
+  subcategory: string;
+  date: string;
+  issuer: string;
+  url: string;
+}
+
+export interface UploadResult {
+  document: DocumentSummary & { size_bytes: number };
+  job: IngestJob;
+}
+
+export interface AdminStats {
+  usage: {
+    window_days: number;
+    total_queries: number;
+    by_mode: Record<string, number>;
+    grounded_rate: number | null;
+    verification: Record<string, number>;
+    revised_answers: number;
+    errors: number;
+    latency_ms: { p50: number | null; p95: number | null };
+    feedback: { positive: number; negative: number };
+    recent_unanswered: string[];
+  };
+  index: { collection?: string; points?: number; status?: string; indexed_vectors?: number; error?: string };
+  documents: { total: number; indexed: number; by_category: Record<string, number> };
+}
+
 export const FEEDBACK_REASONS: { id: string; label: string }[] = [
   { id: "incorrect", label: "Incorrect" },
   { id: "not_grounded", label: "Not supported by sources" },

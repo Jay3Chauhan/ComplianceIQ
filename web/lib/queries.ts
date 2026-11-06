@@ -2,7 +2,7 @@
 
 import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
-import { api, errorMessage } from "@/lib/api/client";
+import { api, errorMessage, toApiError } from "@/lib/api/client";
 import type {
   Conversation,
   ConversationDetail,
@@ -12,6 +12,7 @@ import type {
   Feedback,
   Meta,
   Paginated,
+  Readiness,
   SearchResponse,
 } from "@/lib/api/types";
 
@@ -29,6 +30,22 @@ export const keys = {
 
 export function useMeta() {
   return useQuery({ queryKey: keys.meta, queryFn: () => api<Meta>("meta"), staleTime: 3_600_000 });
+}
+
+/** Dependency checks. The backend answers 503 with the same body when degraded. */
+export function useReady(enabled = true) {
+  return useQuery({
+    queryKey: ["ready"],
+    queryFn: async () => {
+      const res = await fetch("/api/ready", { cache: "no-store" });
+      const body = (await res.json().catch(() => null)) as Readiness | null;
+      if (!body?.checks) throw await toApiError(res);
+      return body;
+    },
+    enabled,
+    staleTime: 15_000,
+    refetchInterval: enabled ? 60_000 : false,
+  });
 }
 
 export function useSuggestions(category: string) {

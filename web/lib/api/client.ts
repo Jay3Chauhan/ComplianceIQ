@@ -24,12 +24,13 @@ export async function toApiError(res: Response): Promise<ApiError> {
 
 type Init = { method?: string; body?: unknown; signal?: AbortSignal };
 
-/** Browser → BFF (/api/*). Throws ApiError with the backend's error code. */
+/** Browser → BFF (/api/*). JSON or FormData bodies. Throws ApiError with the backend's error code. */
 export async function api<T>(path: string, init: Init = {}): Promise<T> {
+  const isForm = init.body instanceof FormData;
   const res = await fetch(`/api/${path.replace(/^\/+/, "")}`, {
     method: init.method ?? (init.body !== undefined ? "POST" : "GET"),
-    headers: init.body !== undefined ? { "Content-Type": "application/json" } : undefined,
-    body: init.body !== undefined ? JSON.stringify(init.body) : undefined,
+    headers: init.body !== undefined && !isForm ? { "Content-Type": "application/json" } : undefined,
+    body: init.body === undefined ? undefined : isForm ? (init.body as FormData) : JSON.stringify(init.body),
     signal: init.signal,
   });
   if (!res.ok) throw await toApiError(res);

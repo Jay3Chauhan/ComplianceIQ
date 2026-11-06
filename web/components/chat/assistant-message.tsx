@@ -200,12 +200,12 @@ export function AssistantMessage({ view, conversationId, isLast, busy, onRegener
 
         {/* compact source row */}
         {!streaming && sources.length > 0 && (
-          <div className="mt-4 flex flex-wrap items-center gap-1.5">
+          <div className="no-scrollbar -mx-1 mt-4 flex items-center gap-1.5 overflow-x-auto px-1 sm:flex-wrap sm:overflow-visible">
             {sources.slice(0, 6).map((s) => (
               <button
                 key={s.chunk_id}
                 onClick={() => onCite(s.id)}
-                className="inline-flex h-7 max-w-[15rem] items-center gap-1.5 rounded-lg border border-border bg-card px-2 text-xs text-muted-foreground transition-colors hover:border-primary/40 hover:text-foreground"
+                className="inline-flex h-7 max-w-[15rem] shrink-0 items-center gap-1.5 rounded-lg border border-border bg-card px-2 text-xs text-muted-foreground transition-colors hover:border-primary/40 hover:text-foreground"
               >
                 <span className="font-mono font-semibold text-primary">{s.id}</span>
                 <span className="truncate">{shortDocName(s.doc_name)}</span>
@@ -215,7 +215,7 @@ export function AssistantMessage({ view, conversationId, isLast, busy, onRegener
             {sources.length > 6 && (
               <button
                 onClick={() => showSources(owner, sources)}
-                className="h-7 rounded-lg px-2 text-xs text-muted-foreground hover:text-foreground"
+                className="h-7 shrink-0 rounded-lg px-2 text-xs text-muted-foreground hover:text-foreground"
               >
                 +{sources.length - 6} more
               </button>
@@ -228,7 +228,7 @@ export function AssistantMessage({ view, conversationId, isLast, busy, onRegener
           <div
             className={cn(
               "mt-2 -ml-1.5 flex items-center gap-0.5 transition-opacity",
-              !isLast && "opacity-0 group-hover/msg:opacity-100 focus-within:opacity-100",
+              !isLast && "opacity-0 group-hover/msg:opacity-100 focus-within:opacity-100 [@media(hover:none)]:opacity-100",
             )}
           >
             <IconButton label={copied ? "Copied" : "Copy answer"} onClick={copy}>
