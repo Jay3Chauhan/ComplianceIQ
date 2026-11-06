@@ -1,161 +1,148 @@
 # ComplianceIQ
 
-ComplianceIQ is a **production-grade RAG (Retrieval-Augmented Generation) system** for Indian financial regulations.
-It ingests RBI Master Directions, SEBI circulars, and Account Aggregator (AA) guidelines as PDFs, indexes them in Qdrant, and answers compliance questions with **grounded citations (document + circular ID + page number)**.
+Grounded Q&A over Indian financial regulations — RBI Master Directions, SEBI master
+circulars and the Account Aggregator framework. Every answer cites the document,
+circular number, section and page, and is checked claim-by-claim against the
+sources before it reaches the user.
 
-## Why this exists
+## What it does
 
-Compliance teams spend hours searching PDFs, circular archives, and internal notes. ComplianceIQ turns your curated regulatory corpus into a fast, auditable Q&A system that:
+- **Cited answers** — `[n]` markers map to the exact passage, section and page.
+- **Says "not found"** instead of guessing when the documents don't cover a question
+  (100% of out-of-scope test questions refused).
+- **Verifies itself** — rule checks (invented citations, uncited claims, numbers not in the
+  sources) plus an LLM claim check; failing answers are repaired once.
+- **Hybrid retrieval** — dense BGE + BM25 fused in Qdrant, cross-encoder rerank, grounding gate.
+- **Conversations, feedback, search, document browser, admin uploads** via a versioned REST + SSE API.
+- **Reliable chat** — answers are saved server-side even if the browser disconnects; stop,
+  regenerate/retry, edit-and-resend, follow-up suggestions, AI titles and Markdown/JSON export.
+- **Next.js web app** in [`web/`](web/README.md) — streaming chat with citations, a sources
+  panel, verification badges, history, document library, passage search, and an admin console
+  (uploads, re-indexing jobs, usage and quality analytics, service health). A Streamlit UI
+  (`frontend/`) is kept for quick local use.
 
-- produces **citation-backed answers** suitable for internal review,
-- reduces time-to-answer for policy interpretation and checks,
-- keeps answers anchored to the exact paragraph/page that was retrieved.
+| Metric (eval set) | v1 | v2 |
+|---|---|---|
+| Correct document at rank 1 | 93% | **100%** |
+| Out-of-scope detection | 84% | **100%** |
+| Answers verified against sources | – | **90%** (100% verified or partial) |
+| Retrieval latency (CPU) | ~8 s | **~2 s** |
 
-## Key features
+Details: [docs/RAG_ARCHITECTURE.md](docs/RAG_ARCHITECTURE.md).
 
-- **Grounded answers with citations** (document name, circular ID, page number)
-- **PDF ingestion pipeline**: parse → chunk → embed → upsert to Qdrant
-- **Local embeddings** with `BAAI/bge-small-en-v1.5` (free, no embedding API cost)
-- **Fast retrieval** using Qdrant Cloud (payload indexes for filtering)
-- **REST API** via FastAPI (`/api/query`, `/api/ingest`, `/api/documents`, `/api/health`)
-- **Chat UI** via Streamlit with source snippets and relevance scores
-- **Evaluation hooks** using RAGAS for faithfulness/relevancy checks
-
-## Primary use-cases
-
-- **Fintech product compliance**: onboarding flows, KYC/AML checks, disclosures, grievance policies
-- **Digital lending**: KFS requirements, FLDG, reporting/consent obligations (depending on ingested docs)
-- **Broker / MF operations**: process adherence to master circulars, audit prep
-- **Account Aggregator**: consent artefacts, data-sharing constraints, technical spec lookups
-- **Internal audits / QA**: “show me the page and circular reference” type questions
-
-## Benefits (what you get)
-
-- **Auditability**: citations per claim make it easier to verify internally
-- **Lower hallucination risk**: system prompt enforces context-only answers and “not found” behavior
-- **Reusable corpus**: ingest once, query repeatedly across teams
-- **Faster compliance turnaround**: reduces manual PDF scanning time
-
-## Architecture (high level)
+## Architecture
 
 ```
-User Question
-  → BGE query embedding
-  → Qdrant similarity search (+ optional filter)
-  → LLM (Groq LLaMA) with retrieved context
-  → Answer + citations + source snippets
-```
+PDF → clean + sections → chunks w/ contextual header → BGE dense + BM25 sparse → Qdrant
 
-## Tech stack
+question → rewrite (follow-ups) → glossary → hybrid RRF → MiniLM rerank → gate
+         → gpt-oss-120b (cited, streamed) → verifier (rules + Qwen) → repair → answer
+```
 
 | Layer | Choice |
-|------|--------|
-| LLM | Groq (`llama-3.3-70b-versatile`) |
-| Embeddings | `sentence-transformers` + `BAAI/bge-small-en-v1.5` (local) |
-| Vector DB | Qdrant Cloud |
-| API | FastAPI |
-| UI | Streamlit |
-| PDF parsing | PyMuPDF + pdfplumber fallback |
-| Eval | RAGAS |
+|---|---|
+| LLM | Groq `openai/gpt-oss-120b` (answers), `qwen/qwen3.8-27b` (rewrite, verification), `gpt-oss-20b` fallback |
+| Embeddings | `BAAI/bge-small-en-v1.5` (local) + `Qdrant/bm25` sparse (fastembed) |
+| Reranker | `cross-encoder/ms-marco-MiniLM-L-6-v2` (local) |
+| Vector DB | Qdrant Cloud, collection `regulations_v2` |
+| API | FastAPI, SSE streaming |
+| Persistence | SQLAlchemy — SQLite by default, Postgres via `DATABASE_URL` |
+| UI | Next.js 16 + Tailwind + shadcn/ui (`web/`); Streamlit (`frontend/`) |
 
 ## Repo layout
 
 ```
-ComplianceIQ/
-├── config.py
-├── requirements.txt
-├── .env.example
-├── data/
-│   ├── documents/               # PDFs (gitignored)
-│   └── document_registry.json   # registry metadata
-├── ingestion/                   # parse → chunk → embed → store
-├── retrieval/                   # Qdrant retrieval
-├── llm/                         # prompt templates + Groq client
-├── api/                         # FastAPI app + routes
-├── frontend/                    # Streamlit UI
-├── evaluation/                  # RAGAS evaluation
-└── tests/
+api/            FastAPI app: v1 routes, legacy routes, auth, errors, middleware, services
+db/             SQLAlchemy models + repository (conversations, messages, feedback, logs, jobs)
+ingestion/      PDF parsing, cleaning, sections, chunking, embedding, registry, pipeline
+retrieval/      hybrid search, reranker, glossary, catalog, cache
+llm/            Groq client, prompts, query rewriter, verifier
+rag/            end-to-end pipeline (answer + stream)
+web/            Next.js frontend (BFF proxy, chat, library, search)
+frontend/       Streamlit app
+evaluation/     retrieval + generation eval harness and test set
+scripts/        smoke test, model check, debugging helpers
+docs/           RAG architecture, API reference, Next.js frontend spec, interview guide
+tests/          unit tests (+ live tests with RUN_INTEGRATION=1)
 ```
 
-## Setup (Windows / PowerShell)
+## Quick start (Windows / PowerShell)
 
-### 1) Create venv + install
-
-```powershell
-python -m venv .venv
-.venv\Scripts\Activate.ps1
-pip install -r requirements.txt
-```
-
-### 2) Configure environment
-
-- Copy `.env.example` → `.env`
-- Fill in your keys (Groq + Qdrant Cloud)
-
-Important:
-- `.env` is **gitignored** by default.
-- never paste keys into commits/issues.
-
-### 3) Add PDFs + update the registry
-
-- Put your PDFs in `data/documents/`
-- Ensure filenames match entries in `data/document_registry.json`
-
-### 4) Ingest PDFs to Qdrant
+Use Python 3.11–3.13 (3.14 breaks some native wheels).
 
 ```powershell
-python -m ingestion.run_ingestion
-```
+py -3.13 -m venv venv
+.\venv\Scripts\Activate.ps1
+pip install -r requirements-dev.txt
 
-### 5) Run API + UI
+copy .env.example .env      # fill GROQ_API_KEY, QDRANT_URL, QDRANT_API_KEY, API_KEYS
+python -m scripts.check_llm # confirms the Groq models are reachable
 
-```powershell
-uvicorn api.main:app --reload --host 0.0.0.0 --port 8000
-```
+# PDFs go in data/documents/, metadata in data/document_registry.json
+python -m ingestion.run_ingestion            # add --recreate to rebuild the collection
 
-In a second terminal:
+uvicorn api.main:app --reload --port 8000    # http://localhost:8000/docs
 
-```powershell
+# second terminal: the web app (http://localhost:3000)
+cd web; npm install
+copy .env.example .env.local   # COMPLIANCEIQ_API_URL, COMPLIANCEIQ_API_KEY=<one of API_KEYS>
+                               # optional admin console: COMPLIANCEIQ_ADMIN_KEY, ADMIN_PASSWORD
+npm run dev
+
+# or the Streamlit UI
+$env:COMPLIANCEIQ_API_KEY="<one of API_KEYS>"
 streamlit run frontend/app.py
 ```
 
-## API usage
+Check everything end to end:
 
-### POST `/api/query`
-
-```bash
-curl -X POST http://localhost:8000/api/query \
-  -H "Content-Type: application/json" \
-  -d '{
-    "question": "What are the KYC requirements for digital lending?",
-    "category": "RBI",
-    "top_k": 5
-  }'
+```powershell
+python scripts/smoke_test.py --api-key <key> --admin-key <admin-key>
 ```
 
-### Admin ingestion: POST `/api/ingest`
+## Using the API
 
 ```bash
-curl -X POST http://localhost:8000/api/ingest \
-  -H "Content-Type: application/json" \
-  -d '{ "filename": "RBI_KYC_Master_Direction_2016.pdf" }'
+curl -N http://localhost:8000/api/v1/chat/stream \
+  -H "X-API-Key: $KEY" -H "Content-Type: application/json" \
+  -d '{"question":"How often must KYC be updated for high-risk customers?"}'
 ```
 
-## Grounding & safety notes
+Full reference, SSE protocol and error codes: [docs/API.md](docs/API.md).
 
-- ComplianceIQ is designed to answer **only from the currently loaded regulatory documents**.
-- If information is not found in retrieved context, it returns a “not found” style response.
-- This is an **internal assistance tool**. Always validate outcomes with your compliance/legal process and regulator sources.
+## Tests and evaluation
 
-## Troubleshooting
+```powershell
+pytest -q                                              # unit tests, no network
+$env:RUN_INTEGRATION="1"; pytest -q tests/test_retrieval.py   # live Qdrant
+python -m evaluation.run_eval retrieval --strategies legacy hybrid_rerank
+python -m evaluation.run_eval generation --limit 10 --negatives 6
+```
 
-- **Qdrant auth/URL issues**: confirm `QDRANT_URL` and `QDRANT_API_KEY` in `.env`
-- **No results**: confirm you ingested documents and the `QDRANT_COLLECTION` name matches
-- **PDF not ingested**: ensure `data/document_registry.json` includes the PDF filename exactly
+## Deployment and operations
 
-## Contributing / Branching
+See [PRODUCTION.md](PRODUCTION.md): the API deploys to Render (Docker) and the web app to
+Vercel with root directory `web`, both from this repository.
 
-See `CONTRIBUTING.md` for the repo workflow (branches, PR checklist, commit conventions).
+## Documentation
+
+| Document | What's in it |
+|---|---|
+| [docs/RAG_ARCHITECTURE.md](docs/RAG_ARCHITECTURE.md) | How a question becomes a cited, verified answer; eval numbers; tuning knobs |
+| [docs/API.md](docs/API.md) | REST + SSE reference, events, error codes |
+| [web/README.md](web/README.md) | Running and structuring the Next.js app, admin console |
+| [docs/FRONTEND_NEXTJS.md](docs/FRONTEND_NEXTJS.md) | Full frontend product and UX spec |
+| [PRODUCTION.md](PRODUCTION.md) | Deployment, configuration, security checklist, troubleshooting |
+| [docs/INTERVIEW_GUIDE.md](docs/INTERVIEW_GUIDE.md) | AI engineer interview Q&A: every design choice, why, when, alternatives |
+| [CONTRIBUTING.md](CONTRIBUTING.md) | Branching model, commit style, checks before a PR |
+
+The same index is in [docs/README.md](docs/README.md).
+
+## Safety note
+
+ComplianceIQ answers only from the documents loaded into it and is an assistive tool.
+Validate conclusions with your compliance/legal process and the regulator's current
+circulars.
 
 ## License
 

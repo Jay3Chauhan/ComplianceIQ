@@ -17,3 +17,9 @@ coverage.xml
 dist/
 build/
 *.egg-info/
+
+evaluation/.cache/
+evaluation/results/
+data/*.db
+data/*.db-*
+data/uploads/

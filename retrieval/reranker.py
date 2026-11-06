@@ -1,38 +1,42 @@
 """
-Optional cross-encoder reranking stage for improved precision.
-Not used by default; wire into retriever.retrieve_chunks if you want reranking.
+Cross-encoder reranking. Scores are probabilities in [0, 1] (sigmoid applied for
+every model) and drive both ordering and the grounding gate, because they are
+far better calibrated than fused RRF scores or raw cosine similarity.
 """
 
+import threading
+
+import torch
 from loguru import logger
 from sentence_transformers import CrossEncoder
 
+from config import settings
+
 _cross_encoder: CrossEncoder | None = None
+_lock = threading.Lock()
 
-DEFAULT_RERANKER_MODEL = "BAAI/bge-reranker-base"
 
-
-def get_reranker(model_name: str = DEFAULT_RERANKER_MODEL) -> CrossEncoder:
+def get_reranker() -> CrossEncoder:
     global _cross_encoder
     if _cross_encoder is None:
-        logger.info(f"Loading reranker model: {model_name}")
-        _cross_encoder = CrossEncoder(model_name)
+        with _lock:
+            if _cross_encoder is None:
+                logger.info(f"Loading reranker: {settings.reranker_model}")
+                _cross_encoder = CrossEncoder(
+                    settings.reranker_model,
+                    max_length=384,
+                    activation_fn=torch.nn.Sigmoid(),
+                )
     return _cross_encoder
 
 
-def rerank_chunks(query: str, chunks: list[dict], top_k: int = 5) -> list[dict]:
-    """
-    Reranks the given chunks against the query using a cross-encoder.
-    Attaches a 'rerank_score' field to each chunk.
-    """
+def rerank_chunks(query: str, chunks: list[dict], top_k: int | None = None) -> list[dict]:
+    """Scores (query, chunk) pairs, attaches `rerank_score`, returns chunks best-first."""
     if not chunks:
         return chunks
-
-    reranker = get_reranker()
-    pairs = [(query, c["chunk_text"]) for c in chunks]
-    scores = reranker.predict(pairs).tolist()
-
+    pairs = [(query, c.get("embed_text") or c["chunk_text"]) for c in chunks]
+    scores = get_reranker().predict(pairs, batch_size=16, show_progress_bar=False)
     for chunk, score in zip(chunks, scores):
-        chunk["rerank_score"] = float(score)
-
-    reranked = sorted(chunks, key=lambda c: c["rerank_score"], reverse=True)
-    return reranked[:top_k]
+        chunk["rerank_score"] = round(float(score), 4)
+    ranked = sorted(chunks, key=lambda c: c["rerank_score"], reverse=True)
+    return ranked[:top_k] if top_k else ranked
