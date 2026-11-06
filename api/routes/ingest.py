@@ -20,6 +20,8 @@ async def ingest(req: IngestRequest) -> IngestResponse:
     if not entry:
         raise APIError(404, "document_not_found", f"'{req.filename}' is not in the document registry.")
     result = await asyncio.to_thread(ingest_document, entry)
-    if result["status"] != "success":
+    if result["status"] == "skipped":
         raise APIError(404, "file_not_found", f"PDF file not found for '{req.filename}'.")
+    if result["status"] != "success":
+        raise APIError(422, "no_extractable_text", result.get("reason", "Ingestion failed."))
     return IngestResponse(**{k: result[k] for k in ("status", "doc_name", "pages", "chunks", "vectors_stored")})

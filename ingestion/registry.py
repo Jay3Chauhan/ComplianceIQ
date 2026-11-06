@@ -42,7 +42,7 @@ def load_registry() -> list[dict]:
 def _save(entries: list[dict]) -> None:
     REGISTRY_PATH.parent.mkdir(parents=True, exist_ok=True)
     tmp = REGISTRY_PATH.with_suffix(".tmp")
-    tmp.write_text(json.dumps(entries, indent=2, ensure_ascii=False), encoding="utf-8")
+    tmp.write_text(json.dumps(entries, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
     tmp.replace(REGISTRY_PATH)
 
 

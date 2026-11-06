@@ -162,7 +162,8 @@ Reports are written to `evaluation/results/` (gitignored).
 
 ## 7. Known limits / next steps
 
-- Scanned PDFs (no text layer) need OCR before ingestion.
+- Scanned PDFs (no text layer) need OCR before ingestion. Without it the ingest job fails
+  with "No extractable text" and the document's existing passages are kept.
 - Tables are flattened to text; numbers survive but column structure doesn't.
 - No date-awareness: superseded circulars are answered like current ones. Add `superseded_by` to the registry and filter.
 - Paid Groq tier (or a second provider) removes the 8K TPM ceiling for concurrent users.

@@ -11,6 +11,7 @@ import {
   PanelLeftCloseIcon,
   SearchIcon,
   Settings2Icon,
+  ShieldCheckIcon,
   TextSearchIcon,
   XIcon,
 } from "lucide-react";
@@ -21,6 +22,7 @@ import { ThemeToggle } from "@/components/shell/theme-toggle";
 import { Button } from "@/components/ui/button";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Skeleton } from "@/components/ui/skeleton";
+import { useAdminSession } from "@/lib/admin-queries";
 import { groupConversations } from "@/lib/format";
 import { useConversations } from "@/lib/queries";
 import { useUI } from "@/lib/ui";
@@ -39,6 +41,8 @@ const NAV = [
   { href: "/documents", label: "Library", icon: LibraryIcon },
   { href: "/search", label: "Passage search", icon: TextSearchIcon },
 ];
+
+const ADMIN_NAV = { href: "/admin", label: "Admin", icon: ShieldCheckIcon };
 
 /** Renders with the pathname once known; dynamic routes only know it at request time. */
 function WithPathname({ children }: { children: (pathname: string | null) => React.ReactNode }) {
@@ -59,6 +63,8 @@ export function Sidebar({ variant }: { variant: "desktop" | "mobile" }) {
   const [archived, setArchived] = useState(false);
   const q = useDebounced(query.trim(), 250);
   const list = useConversations(q, archived);
+  const admin = useAdminSession();
+  const nav = admin.data?.authenticated ? [...NAV, ADMIN_NAV] : NAV;
   const sentinel = useRef<HTMLDivElement>(null);
   const searchRef = useRef<HTMLInputElement>(null);
 
@@ -112,7 +118,7 @@ export function Sidebar({ variant }: { variant: "desktop" | "mobile" }) {
         </Button>
         <WithPathname>
           {(pathname) =>
-            NAV.map(({ href, label, icon: Icon }) => (
+            nav.map(({ href, label, icon: Icon }) => (
               <Link
                 key={href}
                 href={href}
@@ -202,7 +208,15 @@ export function Sidebar({ variant }: { variant: "desktop" | "mobile" }) {
       </ScrollArea>
 
       <div className="flex shrink-0 items-center gap-1 border-t border-sidebar-border px-2 py-2">
-        <Button variant="ghost" size="sm" className="flex-1 justify-start gap-2" onClick={() => setSettingsOpen(true)}>
+        <Button
+          variant="ghost"
+          size="sm"
+          className="flex-1 justify-start gap-2"
+          onClick={() => {
+            close();
+            setSettingsOpen(true);
+          }}
+        >
           <Settings2Icon /> Settings
         </Button>
         {!archived && (
