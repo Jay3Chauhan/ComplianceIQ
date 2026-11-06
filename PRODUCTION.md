@@ -13,6 +13,7 @@ in [docs/RAG_ARCHITECTURE.md](docs/RAG_ARCHITECTURE.md); endpoints are in
 | `API_KEYS` | Yes in production | You generate | Shared with the Next.js server / Streamlit |
 | `ADMIN_API_KEY` | For uploads / re-index | You generate | Admin endpoints return 503 in production without it |
 | Render (or any Docker host) | For the API | [render.com](https://render.com) | ≥ 2 GB RAM (torch + 3 local models) |
+| Vercel (or any Node host) | For the web app | [vercel.com](https://vercel.com) | Root directory `web` |
 | Postgres | Optional | Neon, Supabase, Render | Instead of SQLite when running several instances |
 
 Generate keys with `python -c "import secrets; print(secrets.token_urlsafe(32))"`.
@@ -63,17 +64,40 @@ The Docker image installs CPU-only torch and bakes in the embedding, BM25 and re
 models, so cold starts don't download anything. Startup warm-up takes ~30–60 s on small
 instances; the first request after that is fast.
 
-### UI
+### Web app on Vercel (Next.js, `web/`)
 
-- **Streamlit Cloud**: entry point `frontend/app.py` (dependencies in `frontend/requirements.txt`).
-  Set `COMPLIANCEIQ_API_URL=https://<api>/api` and `COMPLIANCEIQ_API_KEY=<one of API_KEYS>`.
-- **Next.js**: follow [docs/FRONTEND_NEXTJS.md](docs/FRONTEND_NEXTJS.md). The API key stays
-  on the Next.js server (BFF); browsers never see it.
+1. Import the GitHub repo in Vercel and set **Root Directory** to `web` (framework preset:
+   Next.js). The backend and frontend deploy independently from the same repo.
+2. Environment variables (server-only; never `NEXT_PUBLIC_`):
+
+   | Variable | Value |
+   |---|---|
+   | `COMPLIANCEIQ_API_URL` | `https://<your-api>.onrender.com` (no `/api/v1`, no trailing slash) |
+   | `COMPLIANCEIQ_API_KEY` | one of the API's `API_KEYS` |
+   | `COMPLIANCEIQ_ADMIN_KEY` | the API's `ADMIN_API_KEY` (only for the admin console) |
+   | `ADMIN_PASSWORD` | a long random password for `/admin` |
+   | `ADMIN_SESSION_SECRET` | optional; random 32+ characters |
+
+3. The browser only talks to the Next.js server, which adds the keys, so `CORS_ORIGINS` on
+   the API can stay unset.
+4. Answers stream for up to 300 s per request (`maxDuration` in the proxy routes). Plans with a
+   lower function limit cut long answers off; the backend still saves them, and the UI reloads
+   the conversation.
+5. Uploads stream through `/api/admin/*` unbuffered. The platform's request-body limit still
+   applies (about 4.5 MB on Vercel serverless functions). For larger PDFs, upload through the
+   API directly (`POST /api/v1/admin/documents`) or host the web app on a Node server
+   (`npm run build && npm start`, e.g. Render or Docker), which has no such limit.
+
+### Streamlit (optional)
+
+Streamlit Cloud entry point `frontend/app.py` (dependencies in `frontend/requirements.txt`).
+Set `COMPLIANCEIQ_API_URL=https://<api>/api` and `COMPLIANCEIQ_API_KEY=<one of API_KEYS>`.
 
 ## Documents and ingestion
 
 | Task | How |
 |---|---|
+| Day-to-day (upload, edit, re-index, remove, watch jobs) | Web admin console at `/admin` |
 | Initial load / full rebuild | `python -m ingestion.run_ingestion --recreate` (locally, against the production Qdrant) |
 | One category / one file | `--category RBI` · `--file RBI_KYC_Master_Direction_2016.pdf` |
 | Add a PDF in production | `POST /api/v1/admin/documents` (multipart) → poll `GET /api/v1/admin/jobs/{id}` |
@@ -81,7 +105,9 @@ instances; the first request after that is fast.
 | Remove | `DELETE /api/v1/admin/documents/{doc_id}?delete_file=true` |
 
 Ingestion is idempotent: chunk IDs are derived from filename + position, and a
-document's old vectors are deleted before upsert.
+document's old vectors are deleted before upsert. A PDF with no extractable text (scanned
+or image-only) fails the job with a clear reason and leaves the document's existing
+passages untouched.
 
 Uploaded PDFs are stored in `data/documents/` on the API host. On Render this is
 ephemeral unless you move `data/` to the persistent disk; the vectors in Qdrant
@@ -96,6 +122,7 @@ rebuild with `--recreate`. **After changing** `RERANKER_MODEL`, re-calibrate
 - [ ] `.env`, PDFs and `data/*.db` are never committed (all gitignored)
 - [ ] `APP_ENV=production` with `API_KEYS` and `ADMIN_API_KEY` set
 - [ ] API keys only on servers (Next.js BFF / Streamlit secrets), never in browser code
+- [ ] `ADMIN_PASSWORD` is long and random (or leave it unset to disable `/admin`)
 - [ ] `CORS_ORIGINS` restricted, or unset if only server-to-server
 - [ ] Qdrant and Groq keys rotated if ever exposed
 - [ ] Answers are assistive, not legal advice
@@ -105,7 +132,7 @@ rebuild with `--recreate`. **After changing** `RERANKER_MODEL`, re-calibrate
 | Signal | Where |
 |---|---|
 | Per-request logs with `request_id` | stdout (loguru); `X-Request-ID` response header |
-| Usage, latency, verification and feedback stats | `GET /api/v1/admin/stats?days=7` |
+| Usage, latency, verification and feedback stats | `/admin` overview, or `GET /api/v1/admin/stats?days=7` |
 | Every question, mode, gate score, verification, model, timings | `query_logs` table |
 | Thumbs-down reasons | `feedback` table — review weekly; add failing questions to `evaluation/test_questions.json` |
 
@@ -119,6 +146,8 @@ For multiple instances, put a shared limiter (Redis, API gateway) in front.
 | `model_not_found` / every answer errors | Model retired. Run `python -m scripts.check_llm`, update `GROQ_MODEL` / fallbacks. |
 | `503 llm_unavailable`, `rate_limited` events | Groq per-minute token limit. Wait a minute, lower traffic, or use a paid tier. |
 | `401 unauthorized` from the UI | `COMPLIANCEIQ_API_KEY` doesn't match `API_KEYS`. |
+| `/admin` says the console is turned off | Set `ADMIN_PASSWORD` and `COMPLIANCEIQ_ADMIN_KEY` on the web server and redeploy. |
+| Admin actions fail with `401 unauthorized` | `COMPLIANCEIQ_ADMIN_KEY` doesn't match the API's `ADMIN_API_KEY`. |
 | `503 auth_not_configured` | `APP_ENV=production` without `API_KEYS`. |
 | Everything is "not found" | Collection empty or wrong `QDRANT_COLLECTION`; check `/api/v1/ready` and re-ingest. |
 | Answers marked "partially verified" often | Check `verification.unsupported_claims` in `query_logs`; usually missing context → raise `MAX_RETRIEVAL_CHUNKS` or fix the source PDF. |

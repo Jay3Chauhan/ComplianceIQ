@@ -17,7 +17,8 @@ sources before it reaches the user.
 - **Reliable chat** — answers are saved server-side even if the browser disconnects; stop,
   regenerate/retry, edit-and-resend, follow-up suggestions, AI titles and Markdown/JSON export.
 - **Next.js web app** in [`web/`](web/README.md) — streaming chat with citations, a sources
-  panel, verification badges, history, document library and passage search. A Streamlit UI
+  panel, verification badges, history, document library, passage search, and an admin console
+  (uploads, re-indexing jobs, usage and quality analytics, service health). A Streamlit UI
   (`frontend/`) is kept for quick local use.
 
 | Metric (eval set) | v1 | v2 |
@@ -61,7 +62,7 @@ web/            Next.js frontend (BFF proxy, chat, library, search)
 frontend/       Streamlit app
 evaluation/     retrieval + generation eval harness and test set
 scripts/        smoke test, model check, debugging helpers
-docs/           RAG architecture, API reference, Next.js frontend spec
+docs/           RAG architecture, API reference, Next.js frontend spec, interview guide
 tests/          unit tests (+ live tests with RUN_INTEGRATION=1)
 ```
 
@@ -85,6 +86,7 @@ uvicorn api.main:app --reload --port 8000    # http://localhost:8000/docs
 # second terminal: the web app (http://localhost:3000)
 cd web; npm install
 copy .env.example .env.local   # COMPLIANCEIQ_API_URL, COMPLIANCEIQ_API_KEY=<one of API_KEYS>
+                               # optional admin console: COMPLIANCEIQ_ADMIN_KEY, ADMIN_PASSWORD
 npm run dev
 
 # or the Streamlit UI
@@ -119,7 +121,22 @@ python -m evaluation.run_eval generation --limit 10 --negatives 6
 
 ## Deployment and operations
 
-See [PRODUCTION.md](PRODUCTION.md).
+See [PRODUCTION.md](PRODUCTION.md): the API deploys to Render (Docker) and the web app to
+Vercel with root directory `web`, both from this repository.
+
+## Documentation
+
+| Document | What's in it |
+|---|---|
+| [docs/RAG_ARCHITECTURE.md](docs/RAG_ARCHITECTURE.md) | How a question becomes a cited, verified answer; eval numbers; tuning knobs |
+| [docs/API.md](docs/API.md) | REST + SSE reference, events, error codes |
+| [web/README.md](web/README.md) | Running and structuring the Next.js app, admin console |
+| [docs/FRONTEND_NEXTJS.md](docs/FRONTEND_NEXTJS.md) | Full frontend product and UX spec |
+| [PRODUCTION.md](PRODUCTION.md) | Deployment, configuration, security checklist, troubleshooting |
+| [docs/INTERVIEW_GUIDE.md](docs/INTERVIEW_GUIDE.md) | AI engineer interview Q&A: every design choice, why, when, alternatives |
+| [CONTRIBUTING.md](CONTRIBUTING.md) | Branching model, commit style, checks before a PR |
+
+The same index is in [docs/README.md](docs/README.md).
 
 ## Safety note
 
