@@ -32,6 +32,12 @@ def ingest_document(meta: dict, progress: ProgressCallback | None = None) -> dic
     pages = parse_pdf(str(pdf_path), meta)
     report("chunking", 0.2)
     chunks = create_chunks(pages)
+    if not chunks:
+        # Keep the document's previous vectors rather than replacing them with nothing.
+        logger.warning(f"No extractable text in {pdf_path.name}; previous vectors kept")
+        return {"status": "failed", "doc_id": meta.get("doc_id"), "doc_name": meta["name"],
+                "filename": meta["filename"], "pages": len(pages), "chunks": 0, "vectors_stored": 0,
+                "reason": "No extractable text: the PDF may be scanned or image-only (OCR is not supported)."}
     report("embedding", 0.3)
     stored = embed_and_store(chunks, show_progress=progress is None)
     report("done", 1.0)

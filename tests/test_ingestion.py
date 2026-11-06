@@ -66,6 +66,22 @@ def test_tiny_and_numeric_text_is_skipped() -> None:
     assert create_chunks([_page([_para(" ".join(str(i) for i in range(200)))])]) == []
 
 
+def test_pdf_without_text_fails_and_keeps_vectors(tmp_path, monkeypatch) -> None:
+    from ingestion import pipeline
+
+    pdf = tmp_path / "scan.pdf"
+    pdf.write_bytes(b"%PDF-1.4")
+    stored: list = []
+    monkeypatch.setattr(pipeline, "pdf_path_for", lambda meta: pdf)
+    monkeypatch.setattr(pipeline, "parse_pdf", lambda path, meta: [_page([_para("short")])])
+    monkeypatch.setattr(pipeline, "embed_and_store", lambda chunks, **kw: stored.append(chunks) or 0)
+
+    result = pipeline.ingest_document({"doc_id": "scan", "name": "Scan", "filename": "scan.pdf"})
+    assert result["status"] == "failed"
+    assert "No extractable text" in result["reason"]
+    assert stored == []
+
+
 def test_registry_roundtrip(tmp_path, monkeypatch) -> None:
     path = tmp_path / "registry.json"
     path.write_text(json.dumps([{"filename": "A.pdf", "name": "A", "category": "RBI"}]))
