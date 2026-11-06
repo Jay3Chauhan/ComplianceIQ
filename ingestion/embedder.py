@@ -1,36 +1,50 @@
 """
-Generates embeddings using BGE-small and upserts to Qdrant.
-Supports idempotent re-ingest (delete by filename before upsert).
+Dense (BGE) + sparse (BM25) embeddings and Qdrant storage.
+
+Collection layout (hybrid):
+  vectors:        "dense" → 384-d cosine (BAAI/bge-small-en-v1.5)
+  sparse vectors: "bm25"  → BM25 term weights with server-side IDF
 """
 
+import threading
 import time
+from collections.abc import Iterable
 
-from sentence_transformers import SentenceTransformer
-from qdrant_client import QdrantClient
-from qdrant_client.models import (
-    PointStruct,
-    VectorParams,
-    Distance,
-    PayloadSchemaType,
-    Filter,
-    FieldCondition,
-    MatchValue,
-)
-from tqdm import tqdm
+from fastembed import SparseTextEmbedding
 from loguru import logger
+from qdrant_client import QdrantClient, models
+from sentence_transformers import SentenceTransformer
+from tqdm import tqdm
+
 from config import settings
 
-
-_model: SentenceTransformer | None = None
+_dense: SentenceTransformer | None = None
+_sparse: SparseTextEmbedding | None = None
 _qdrant: QdrantClient | None = None
+_lock = threading.Lock()
+
+KEYWORD_INDEXES = ("category", "filename", "doc_id", "circular_id")
+INTEGER_INDEXES = ("page_number", "seq")
 
 
-def get_embedding_model() -> SentenceTransformer:
-    global _model
-    if _model is None:
-        logger.info(f"Loading embedding model: {settings.embedding_model}")
-        _model = SentenceTransformer(settings.embedding_model)
-    return _model
+def get_dense_model() -> SentenceTransformer:
+    global _dense
+    if _dense is None:
+        with _lock:
+            if _dense is None:
+                logger.info(f"Loading dense model: {settings.embedding_model}")
+                _dense = SentenceTransformer(settings.embedding_model)
+    return _dense
+
+
+def get_sparse_model() -> SparseTextEmbedding:
+    global _sparse
+    if _sparse is None:
+        with _lock:
+            if _sparse is None:
+                logger.info(f"Loading sparse model: {settings.sparse_model}")
+                _sparse = SparseTextEmbedding(settings.sparse_model)
+    return _sparse
 
 
 def get_qdrant_client() -> QdrantClient:
@@ -44,112 +58,140 @@ def get_qdrant_client() -> QdrantClient:
     return _qdrant
 
 
+def embed_dense_documents(texts: list[str]) -> list[list[float]]:
+    return get_dense_model().encode(
+        texts, normalize_embeddings=True, batch_size=32
+    ).tolist()
+
+
+def embed_dense_query(query: str) -> list[float]:
+    return get_dense_model().encode(
+        settings.query_instruction + query, normalize_embeddings=True
+    ).tolist()
+
+
+def embed_sparse_documents(texts: list[str]) -> list[models.SparseVector]:
+    return [
+        models.SparseVector(indices=e.indices.tolist(), values=e.values.tolist())
+        for e in get_sparse_model().embed(texts, batch_size=32)
+    ]
+
+
+def embed_sparse_query(query: str) -> models.SparseVector:
+    e = next(iter(get_sparse_model().query_embed(query)))
+    return models.SparseVector(indices=e.indices.tolist(), values=e.values.tolist())
+
+
+def collection_exists(name: str | None = None) -> bool:
+    name = name or settings.qdrant_collection
+    return name in {c.name for c in get_qdrant_client().get_collections().collections}
+
+
 def ensure_collection_exists() -> None:
-    """Creates the Qdrant collection and payload indexes if needed."""
+    """Creates the hybrid collection and payload indexes if missing."""
     client = get_qdrant_client()
-    existing = [c.name for c in client.get_collections().collections]
-
-    if settings.qdrant_collection not in existing:
+    name = settings.qdrant_collection
+    if not collection_exists(name):
         client.create_collection(
-            collection_name=settings.qdrant_collection,
-            vectors_config=VectorParams(
-                size=settings.embedding_dim,
-                distance=Distance.COSINE,
-            ),
+            collection_name=name,
+            vectors_config={
+                settings.dense_vector_name: models.VectorParams(
+                    size=settings.embedding_dim, distance=models.Distance.COSINE
+                )
+            },
+            sparse_vectors_config={
+                settings.sparse_vector_name: models.SparseVectorParams(
+                    modifier=models.Modifier.IDF
+                )
+            },
         )
-        logger.success(f"Created Qdrant collection: {settings.qdrant_collection}")
-    else:
-        logger.info(f"Collection '{settings.qdrant_collection}' already exists")
+        logger.success(f"Created hybrid collection: {name}")
 
-    for field in ("category", "circular_id", "doc_name", "filename"):
-        try:
-            client.create_payload_index(
-                settings.qdrant_collection, field, PayloadSchemaType.KEYWORD
-            )
-        except Exception:
-            # Index may already exist
-            pass
+        for field in KEYWORD_INDEXES:
+            client.create_payload_index(name, field, models.PayloadSchemaType.KEYWORD)
+        for field in INTEGER_INDEXES:
+            client.create_payload_index(name, field, models.PayloadSchemaType.INTEGER)
 
 
 def delete_by_filename(filename: str) -> None:
-    """Removes all vectors for a given source PDF (idempotent re-ingest)."""
-    if not filename:
+    """Removes all vectors for one source PDF (idempotent re-ingest)."""
+    if not filename or not collection_exists():
         return
-    client = get_qdrant_client()
-    ensure_collection_exists()
-    try:
-        client.delete(
-            collection_name=settings.qdrant_collection,
-            points_selector=Filter(
-                must=[FieldCondition(key="filename", match=MatchValue(value=filename))]
-            ),
-        )
-        logger.info(f"Deleted existing vectors for filename={filename}")
-    except Exception as e:
-        logger.warning(f"Delete-by-filename skipped: {e}")
+    get_qdrant_client().delete(
+        collection_name=settings.qdrant_collection,
+        points_selector=models.FilterSelector(
+            filter=models.Filter(
+                must=[models.FieldCondition(key="filename", match=models.MatchValue(value=filename))]
+            )
+        ),
+        wait=True,
+    )
+    logger.info(f"Deleted existing vectors for {filename}")
+
+
+def count_by_filename(filename: str) -> int:
+    return get_qdrant_client().count(
+        collection_name=settings.qdrant_collection,
+        count_filter=models.Filter(
+            must=[models.FieldCondition(key="filename", match=models.MatchValue(value=filename))]
+        ),
+        exact=True,
+    ).count
+
+
+def _batches(items: list[dict], size: int) -> Iterable[list[dict]]:
+    for i in range(0, len(items), size):
+        yield items[i : i + size]
 
 
 def embed_and_store(
     chunks: list[dict],
     batch_size: int = 32,
     replace_existing: bool = True,
+    show_progress: bool = True,
 ) -> int:
     """
-    Embeds chunk texts and upserts to Qdrant in batches.
-    When replace_existing=True, deletes prior vectors for the same filename first.
+    Embeds chunks (dense + sparse) and upserts them.
+    Each chunk must carry `chunk_id`, `embed_text` and payload fields.
     """
     if not chunks:
         return 0
 
-    model = get_embedding_model()
-    client = get_qdrant_client()
     ensure_collection_exists()
-
+    client = get_qdrant_client()
     if replace_existing:
-        filename = chunks[0].get("filename", "")
-        if filename:
-            delete_by_filename(filename)
+        delete_by_filename(chunks[0].get("filename", ""))
 
-    total_stored = 0
+    batches = list(_batches(chunks, batch_size))
+    iterator = tqdm(batches, desc="Embedding & storing") if show_progress else batches
+    stored = 0
 
-    for i in tqdm(range(0, len(chunks), batch_size), desc="Embedding & storing"):
-        batch = chunks[i : i + batch_size]
-        texts = [c["chunk_text"] for c in batch]
-        # bge-small-en-v1.5 does not use query/passage instruction prefixes
-        vectors = model.encode(texts, normalize_embeddings=True).tolist()
-
+    for batch in iterator:
+        texts = [c["embed_text"] for c in batch]
+        dense = embed_dense_documents(texts)
+        sparse = embed_sparse_documents(texts)
         points = [
-            PointStruct(
-                id=chunk["chunk_id"],
-                vector=vector,
-                payload={k: v for k, v in chunk.items() if k != "chunk_id"},
+            models.PointStruct(
+                id=c["chunk_id"],
+                vector={
+                    settings.dense_vector_name: d,
+                    settings.sparse_vector_name: s,
+                },
+                payload={k: v for k, v in c.items() if k not in ("chunk_id", "embed_text")},
             )
-            for chunk, vector in zip(batch, vectors)
+            for c, d, s in zip(batch, dense, sparse)
         ]
-
         for attempt in range(3):
             try:
-                client.upsert(
-                    collection_name=settings.qdrant_collection,
-                    points=points,
-                )
+                client.upsert(collection_name=settings.qdrant_collection, points=points)
                 break
             except Exception as e:
-                if attempt < 2:
-                    wait = 5 * (attempt + 1)
-                    logger.warning(
-                        f"Upsert attempt {attempt + 1} failed ({e}), retrying in {wait}s..."
-                    )
-                    time.sleep(wait)
-                else:
+                if attempt == 2:
                     raise
-        total_stored += len(points)
+                wait = 5 * (attempt + 1)
+                logger.warning(f"Upsert failed ({e}); retrying in {wait}s")
+                time.sleep(wait)
+        stored += len(points)
 
-    logger.success(f"Stored {total_stored} vectors in Qdrant")
-    return total_stored
-
-
-def embed_query(query: str) -> list[float]:
-    """Embeds a single query string for dense retrieval."""
-    model = get_embedding_model()
-    return model.encode(query, normalize_embeddings=True).tolist()
+    logger.success(f"Stored {stored} vectors in {settings.qdrant_collection}")
+    return stored

@@ -3,7 +3,7 @@ services:
     name: complianceiq-api
     runtime: docker
     plan: standard
-    healthCheckPath: /api/health
+    healthCheckPath: /api/v1/health
     envVars:
       - key: GROQ_API_KEY
         sync: false
@@ -12,20 +12,20 @@ services:
       - key: QDRANT_API_KEY
         sync: false
       - key: QDRANT_COLLECTION
-        value: regulations
+        value: regulations_v2
+      - key: API_KEYS
+        sync: false
       - key: ADMIN_API_KEY
+        sync: false
+      - key: CORS_ORIGINS
         sync: false
       - key: APP_ENV
         value: production
-      - key: ENABLE_RERANK
-        value: "true"
-      - key: CORS_ORIGINS
-        sync: false
-      - key: CHUNK_SIZE
-        value: "900"
-      - key: CHUNK_OVERLAP
-        value: "120"
-      - key: MAX_RETRIEVAL_CHUNKS
-        value: "6"
-      - key: GROUNDED_MIN_SCORE
-        value: "0.45"
+      # Render disks are the simplest way to keep SQLite across deploys;
+      # otherwise point this at a managed Postgres.
+      - key: DATABASE_URL
+        value: sqlite:////var/data/complianceiq.db
+    disk:
+      name: complianceiq-data
+      mountPath: /var/data
+      sizeGB: 1

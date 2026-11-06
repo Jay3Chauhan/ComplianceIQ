@@ -1,30 +1,28 @@
-"""Pydantic models for request/response validation."""
+"""Pydantic models for the legacy /api endpoints (used by the Streamlit UI)."""
+
+from typing import Literal
 
 from pydantic import BaseModel, Field
-from typing import Optional, Literal
 
 
 class QueryRequest(BaseModel):
-    question: str = Field(..., min_length=5, max_length=1000, description="The compliance question")
-    category: Optional[Literal["ALL", "RBI", "SEBI", "AA"]] = Field(
-        default="ALL", description="Filter by document category"
-    )
-    top_k: Optional[int] = Field(default=6, ge=1, le=10, description="Number of chunks to retrieve")
-    history: Optional[list[dict]] = Field(default=None, description="Previous conversation turns")
-    answer_mode: Optional[Literal["auto", "regulatory", "general"]] = Field(
+    question: str = Field(..., min_length=3, max_length=2000, description="The compliance question")
+    category: Literal["ALL", "RBI", "SEBI", "AA"] | None = Field(default="ALL")
+    top_k: int | None = Field(default=6, ge=1, le=10)
+    history: list[dict] | None = Field(default=None, max_length=10)
+    answer_mode: Literal["auto", "regulatory", "general"] | None = Field(
         default="auto",
-        description=(
-            "auto: grounded when confident else general; "
-            "regulatory: citations only / not-found; "
-            "general: finance knowledge without retrieval citations"
-        ),
+        description="auto: cited when documents match, else general; regulatory: cited or not-found; "
+        "general: no retrieval",
     )
 
 
 class SourceDocument(BaseModel):
+    id: int | None = None
     doc_name: str
     circular_id: str
     category: str
+    section: str = ""
     page_number: int
     date: str
     source_url: str
@@ -40,6 +38,9 @@ class QueryResponse(BaseModel):
     usage: dict
     mode: str = "regulatory"
     latency_ms: int = 0
+    confidence: str | None = None
+    verification: dict | None = None
+    revised: bool = False
 
 
 class IngestRequest(BaseModel):

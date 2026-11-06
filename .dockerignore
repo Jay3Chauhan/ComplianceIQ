@@ -6,9 +6,14 @@ __pycache__
 *.pyc
 .env
 data/documents
+data/uploads
+data/*.db
+data/*.db-*
 *.pdf
 .pytest_cache
 .mypy_cache
 *.log
 .DS_Store
 agent-transcripts
+evaluation/.cache
+evaluation/results

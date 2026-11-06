@@ -3,58 +3,64 @@ FastAPI application entry point.
 Run with: uvicorn api.main:app --reload --host 0.0.0.0 --port 8000
 """
 
+import asyncio
 import os
 import time
-import asyncio
 from contextlib import asynccontextmanager
-from fastapi import FastAPI
+
+from fastapi import Depends, FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from loguru import logger
-from api.routes import query, ingest, documents
+
+from api import v1
+from api.errors import register_error_handlers
+from api.middleware import RequestContextMiddleware
+from api.routes import documents, ingest, query
+from api.security import require_api_key
+from api.v1.meta import APP_VERSION
 from config import settings
 
 
 async def _warmup() -> None:
-    """Eagerly initialise heavy singletons off the event loop."""
+    """Loads models and opens connections before the first request."""
     t0 = time.perf_counter()
-    logger.info("Warming up embedding model…")
-    from ingestion.embedder import get_embedding_model, get_qdrant_client
+    from ingestion.embedder import get_dense_model, get_qdrant_client, get_sparse_model
 
-    await asyncio.to_thread(get_embedding_model)
-    logger.info(f"Embedding model ready ({time.perf_counter() - t0:.1f}s)")
-
-    t1 = time.perf_counter()
+    await asyncio.to_thread(get_dense_model)
+    await asyncio.to_thread(get_sparse_model)
     await asyncio.to_thread(get_qdrant_client)
-    logger.info(f"Qdrant connected ({time.perf_counter() - t1:.1f}s)")
-
     if settings.enable_rerank:
-        t2 = time.perf_counter()
-        try:
-            from retrieval.reranker import get_reranker
+        from retrieval.reranker import get_reranker
 
-            await asyncio.to_thread(get_reranker, settings.reranker_model)
-            logger.info(f"Reranker ready ({time.perf_counter() - t2:.1f}s)")
-        except Exception as e:
-            logger.warning(f"Reranker warmup skipped: {e}")
-
-    logger.info(f"All systems ready — warmup {time.perf_counter() - t0:.1f}s")
+        await asyncio.to_thread(get_reranker)
+    logger.info(f"Models warm in {time.perf_counter() - t0:.1f}s")
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    from api.services.jobs import fail_orphaned_jobs
+    from db.session import init_db
+
+    init_db()
+    fail_orphaned_jobs()
+    if settings.is_production and not settings.api_key_list:
+        logger.error("API_KEYS is not set: protected endpoints will return 503 in production.")
     if os.getenv("COMPLIANCEIQ_SKIP_WARMUP") == "1":
         logger.info("Skipping warmup (COMPLIANCEIQ_SKIP_WARMUP=1)")
     else:
         await _warmup()
-    logger.info("Docs available at http://localhost:8000/docs")
+    logger.info("ComplianceIQ API ready — docs at /docs")
     yield
     logger.info("ComplianceIQ API shutting down.")
 
 
 app = FastAPI(
     title="ComplianceIQ API",
-    description="Production RAG Q&A for RBI/SEBI/AA Indian regulatory documents",
-    version="1.1.0",
+    description=(
+        "Grounded, cited Q&A over RBI / SEBI / Account Aggregator regulations.\n\n"
+        "Use `/api/v1/*` for new integrations. `/api/query*` endpoints are kept for the Streamlit UI."
+    ),
+    version=APP_VERSION,
     docs_url="/docs",
     redoc_url="/redoc",
     lifespan=lifespan,
@@ -63,22 +69,28 @@ app = FastAPI(
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.cors_origin_list,
-    allow_credentials=True,
-    allow_methods=["*"],
+    allow_credentials=settings.cors_origin_list != ["*"],
+    allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
     allow_headers=["*"],
+    expose_headers=["X-Request-ID", "X-Response-Time-ms", "Retry-After"],
 )
+app.add_middleware(RequestContextMiddleware)
+register_error_handlers(app)
 
-app.include_router(query.router, prefix="/api", tags=["Query"])
-app.include_router(ingest.router, prefix="/api", tags=["Ingestion"])
-app.include_router(documents.router, prefix="/api", tags=["Documents"])
+app.include_router(v1.router)
+
+legacy = [Depends(require_api_key)]
+app.include_router(query.router, prefix="/api", tags=["Legacy"], dependencies=legacy)
+app.include_router(ingest.router, prefix="/api", tags=["Legacy"], dependencies=legacy)
+app.include_router(documents.router, prefix="/api", tags=["Legacy"])
 
 
-@app.get("/")
+@app.get("/", include_in_schema=False)
 async def root() -> dict:
     return {
         "name": "ComplianceIQ",
-        "version": "1.1.0",
-        "description": "RBI/SEBI Regulatory RAG Bot",
+        "version": APP_VERSION,
         "docs": "/docs",
-        "health": "/api/health",
+        "health": "/api/v1/health",
+        "ready": "/api/v1/ready",
     }

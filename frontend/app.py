@@ -14,6 +14,8 @@ import requests
 import streamlit as st
 
 API_BASE = os.getenv("COMPLIANCEIQ_API_URL", "http://localhost:8000/api").rstrip("/")
+API_KEY = os.getenv("COMPLIANCEIQ_API_KEY", "")
+HEADERS = {"X-API-Key": API_KEY} if API_KEY else {}
 
 st.set_page_config(
     page_title="ComplianceIQ",
@@ -69,6 +71,10 @@ html, body, [class*="css"] { font-family: 'IBM Plex Sans', sans-serif; }
 .mode-gen { background: #1a1030; border: 1px solid #3b2660; color: #c4b5fd; }
 .mode-nf  { background: #3f1d0a; border: 1px solid #9a3412; color: #fdba74; }
 
+.ver-ok   { background: #052e1a; border: 1px solid #166534; color: #86efac; }
+.ver-part { background: #2d2306; border: 1px solid #854d0e; color: #fde047; }
+.ver-bad  { background: #3f0d0d; border: 1px solid #991b1b; color: #fca5a5; }
+
 .meta-row { margin-top: 8px; color: #94a3b8; font-size: 0.75rem; }
 .source-card {
   background: #020617; border: 1px solid #1e293b; border-radius: 10px;
@@ -102,7 +108,7 @@ def fetch_docs(force: bool = False) -> list[dict]:
     if not force and st.session_state.docs_cache is not None:
         return st.session_state.docs_cache
     try:
-        r = requests.get(f"{API_BASE}/documents", timeout=15)
+        r = requests.get(f"{API_BASE}/documents", headers=HEADERS, timeout=15)
         r.raise_for_status()
         st.session_state.docs_cache = r.json()
         st.session_state.api_ok = True
@@ -128,6 +134,28 @@ def mode_label(mode: str) -> str:
         "general": '<span class="mode-pill mode-gen">General finance — AI knowledge</span>',
         "not_found": '<span class="mode-pill mode-nf">Not found in loaded corpus</span>',
     }.get(mode, "")
+
+
+def verification_label(ver: dict | None, revised: bool = False) -> str:
+    if not ver or ver.get("status") in (None, "not_applicable"):
+        return ""
+    status = ver["status"]
+    css, text = {
+        "verified": ("ver-ok", "Verified against sources"),
+        "partially_verified": ("ver-part", "Partially verified — check citations"),
+        "unverified": ("ver-bad", "Could not verify — read sources before relying on this"),
+    }.get(status, ("ver-part", status))
+    if revised:
+        text += " · auto-corrected"
+    return f'<span class="mode-pill {css}" title="Score {ver.get("score", 0):.2f}">{text}</span>'
+
+
+def _error_message(resp: requests.Response) -> str:
+    try:
+        body = resp.json()
+        return body.get("error", {}).get("message") or body.get("detail") or resp.reason
+    except ValueError:
+        return f"API error {resp.status_code}"
 
 
 def render_sources(sources: list[dict]) -> None:
@@ -168,12 +196,15 @@ def stream_query(
     answer_mode: str,
     history_payload: list | None,
 ):
-    """Yields ('status'|'token'|'error', content) tuples."""
-    st.session_state._stream_meta = {
+    """Yields ('status'|'token'|'revision'|'error', content) tuples."""
+    meta = st.session_state._stream_meta = {
         "sources": [],
         "mode": "general",
         "usage": {},
         "latency_ms": 0,
+        "verification": None,
+        "revised": False,
+        "confidence": None,
     }
     try:
         with requests.post(
@@ -185,10 +216,13 @@ def stream_query(
                 "answer_mode": answer_mode,
                 "history": history_payload,
             },
+            headers=HEADERS,
             stream=True,
             timeout=120,
         ) as resp:
-            resp.raise_for_status()
+            if resp.status_code >= 400:
+                yield ("error", _error_message(resp))
+                return
             for raw in resp.iter_lines():
                 if not raw:
                     continue
@@ -208,13 +242,25 @@ def stream_query(
                 elif kind == "token":
                     yield ("token", ev.get("content", ""))
                 elif kind == "meta":
-                    st.session_state._stream_meta["sources"] = ev.get("sources", [])
-                    st.session_state._stream_meta["mode"] = ev.get("mode", "general")
-                    yield ("status", f"Mode: {ev.get('mode', 'general')}")
+                    meta["sources"] = ev.get("sources", [])
+                    meta["mode"] = ev.get("mode", "general")
+                elif kind == "revision":
+                    meta["mode"] = ev.get("mode", meta["mode"])
+                    if "sources" in ev:
+                        meta["sources"] = ev["sources"]
+                    # Revisions also normalize typography; only a repair pass counts as a correction
+                    meta["revised"] = meta.get("repairing", False) and meta["mode"] != "not_found"
+                    yield ("revision", ev.get("answer", ""))
+                elif kind == "verification":
+                    if ev.get("final", True):
+                        meta["verification"] = ev
+                    else:
+                        meta["repairing"] = True
                 elif kind == "usage":
                     if ev.get("usage"):
-                        st.session_state._stream_meta["usage"] = ev["usage"]
-                    st.session_state._stream_meta["latency_ms"] = ev.get("latency_ms", 0)
+                        meta["usage"] = ev["usage"]
+                    meta["latency_ms"] = ev.get("latency_ms", 0)
+                    meta["confidence"] = ev.get("confidence")
                 elif kind == "error":
                     yield ("error", ev.get("content", "Something went wrong."))
     except requests.exceptions.ConnectionError:
@@ -331,8 +377,10 @@ for idx, turn in enumerate(st.session_state.history):
         st.markdown(turn["question"])
     with st.chat_message("assistant"):
         st.markdown(turn["answer"])
-        label = mode_label(turn.get("mode", ""))
-        if label:
+        label = mode_label(turn.get("mode", "")) + " " + verification_label(
+            turn.get("verification"), turn.get("revised", False)
+        )
+        if label.strip():
             st.markdown(label, unsafe_allow_html=True)
         latency = turn.get("latency_ms")
         if latency:
@@ -388,6 +436,9 @@ if question:
             elif kind == "token":
                 buf.append(content)
                 answer_box.markdown("".join(buf) + " ▌")
+            elif kind == "revision":
+                buf = [content]
+                answer_box.markdown(content)
             elif kind == "error":
                 errored = True
                 status_box.empty()
@@ -406,8 +457,8 @@ if question:
         latency_ms = meta.get("latency_ms", 0)
 
         if not errored:
-            label = mode_label(mode)
-            if label:
+            label = mode_label(mode) + " " + verification_label(meta.get("verification"), meta.get("revised", False))
+            if label.strip():
                 st.markdown(label, unsafe_allow_html=True)
             if latency_ms:
                 st.markdown(
@@ -424,6 +475,8 @@ if question:
             "sources": sources if not errored else [],
             "mode": mode if not errored else "error",
             "usage": meta.get("usage", {}),
+            "verification": meta.get("verification") if not errored else None,
+            "revised": meta.get("revised", False),
             "latency_ms": latency_ms,
             "time": datetime.now().strftime("%I:%M %p"),
         }
